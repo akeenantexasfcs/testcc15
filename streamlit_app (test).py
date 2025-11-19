@@ -1662,7 +1662,13 @@ def create_allocation_changes_table(optimized_alloc_df, naive_alloc_df, selected
             grid_optimized = optimized_alloc_df.loc[grid, INTERVAL_ORDER_11]
         else:
             # Fallback to optimized average if grid not found
-            grid_optimized = optimized_alloc_df.loc['OPTIMIZED AVERAGE', INTERVAL_ORDER_11]
+            if 'OPTIMIZED AVERAGE' in optimized_alloc_df.index:
+                grid_optimized = optimized_alloc_df.loc['OPTIMIZED AVERAGE', INTERVAL_ORDER_11]
+            elif 'PORTFOLIO AVERAGE' in optimized_alloc_df.index:
+                grid_optimized = optimized_alloc_df.loc['PORTFOLIO AVERAGE', INTERVAL_ORDER_11]
+            else:
+                # Last resort: use naive as fallback
+                grid_optimized = grid_naive
 
         net_change = 0
         for interval in INTERVAL_ORDER_11:
@@ -1675,7 +1681,17 @@ def create_allocation_changes_table(optimized_alloc_df, naive_alloc_df, selected
 
     # Add average shift row (comparing portfolio averages)
     avg_naive = naive_alloc_df.loc['AVERAGE', INTERVAL_ORDER_11]
-    avg_optimized = optimized_alloc_df.loc['OPTIMIZED AVERAGE', INTERVAL_ORDER_11]
+
+    # Handle different row names for average based on optimization mode
+    if 'OPTIMIZED AVERAGE' in optimized_alloc_df.index:
+        avg_optimized = optimized_alloc_df.loc['OPTIMIZED AVERAGE', INTERVAL_ORDER_11]
+    elif 'PORTFOLIO AVERAGE' in optimized_alloc_df.index:
+        avg_optimized = optimized_alloc_df.loc['PORTFOLIO AVERAGE', INTERVAL_ORDER_11]
+    else:
+        # Fallback: calculate average from grid data
+        grid_only_df = optimized_alloc_df[optimized_alloc_df.index.isin(selected_grids)]
+        avg_optimized = grid_only_df[INTERVAL_ORDER_11].mean()
+
     avg_row = {'Grid': 'AVERAGE SHIFT'}
     net_change = 0
     for interval in INTERVAL_ORDER_11:
@@ -2966,7 +2982,13 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                     if grid in opt_detailed_df.index:
                         grid_optimized = opt_detailed_df.loc[grid, INTERVAL_ORDER_11]
                     else:
-                        grid_optimized = opt_detailed_df.loc['OPTIMIZED AVERAGE', INTERVAL_ORDER_11]
+                        # Fallback to optimized average if grid not found
+                        if 'OPTIMIZED AVERAGE' in opt_detailed_df.index:
+                            grid_optimized = opt_detailed_df.loc['OPTIMIZED AVERAGE', INTERVAL_ORDER_11]
+                        elif 'PORTFOLIO AVERAGE' in opt_detailed_df.index:
+                            grid_optimized = opt_detailed_df.loc['PORTFOLIO AVERAGE', INTERVAL_ORDER_11]
+                        else:
+                            grid_optimized = grid_naive
 
                     net_change = 0
                     for interval in INTERVAL_ORDER_11:
