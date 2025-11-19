@@ -322,33 +322,36 @@ def calculate_yearly_roi(year_indices_df, allocation, static_data, coverage_leve
     for interval, pct in allocation.items():
         if pct <= 0:
             continue
-        
-        row = year_indices_df[year_indices_df['INTERVAL_NAME'] == interval]
-        if row.empty:
-            continue
-        
-        try:
-            index_value = float(row['INDEX_VALUE'].iloc[0])
-            if pd.isna(index_value):
-                continue
-        except (ValueError, TypeError):
-            continue
-            
+
         premium_rate = premiums.get(interval, 0)
-        
+
         if premium_rate <= 0:
             continue
 
         interval_protection = total_protection * pct
         total_premium = interval_protection * premium_rate
         producer_premium = total_premium - (total_premium * subsidy)
-        
+
+        # Premium is always charged based on allocation, regardless of data availability
+        total_producer_premium += max(0, producer_premium)
+
+        # Indemnity only calculated if index data exists for this year
+        row = year_indices_df[year_indices_df['INTERVAL_NAME'] == interval]
+        if row.empty:
+            continue
+
+        try:
+            index_value = float(row['INDEX_VALUE'].iloc[0])
+            if pd.isna(index_value):
+                continue
+        except (ValueError, TypeError):
+            continue
+
         trigger = coverage_level * 100
         shortfall_pct = max(0, (trigger - index_value) / trigger)
         indemnity = shortfall_pct * interval_protection
-        
-        total_indemnity += indemnity
-        total_producer_premium += max(0, producer_premium) 
+
+        total_indemnity += indemnity 
     
     if total_producer_premium == 0:
         if total_indemnity > 0:
@@ -2540,7 +2543,7 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
         st.markdown("#### Scenario Definition")
         
         scenario_options = [
-            'All Years',
+            'All Years (except Current Year)',
             'Historically Dry Years (< -0.25 Z)',
             'Historically Normal Years (-0.25 to 0.25 Z)',
             'Historically Wet Years (> 0.25 Z)',
@@ -2579,20 +2582,21 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
             portfolio_avg_phase_by_year = all_year_df.groupby('year')['dominant_phase'].apply(lambda x: x.mode()[0] if not x.empty else 'Neutral')
             
             analog_years_list = []
-            if selected_scenario == 'All Years':
-                analog_years_list = portfolio_avg_z_by_year.index.tolist()
+            if selected_scenario == 'All Years (except Current Year)':
+                # Exclude current year (2025) and any future years - only use historical data
+                analog_years_list = [yr for yr in portfolio_avg_z_by_year.index.tolist() if yr < 2025]
             elif selected_scenario == 'Historically Dry Years (< -0.25 Z)':
-                analog_years_list = portfolio_avg_z_by_year[portfolio_avg_z_by_year < -0.25].index.tolist()
+                analog_years_list = [yr for yr in portfolio_avg_z_by_year[portfolio_avg_z_by_year < -0.25].index.tolist() if yr < 2025]
             elif selected_scenario == 'Historically Normal Years (-0.25 to 0.25 Z)':
-                analog_years_list = portfolio_avg_z_by_year[(portfolio_avg_z_by_year >= -0.25) & (portfolio_avg_z_by_year <= 0.25)].index.tolist()
+                analog_years_list = [yr for yr in portfolio_avg_z_by_year[(portfolio_avg_z_by_year >= -0.25) & (portfolio_avg_z_by_year <= 0.25)].index.tolist() if yr < 2025]
             elif selected_scenario == 'Historically Wet Years (> 0.25 Z)':
-                analog_years_list = portfolio_avg_z_by_year[portfolio_avg_z_by_year > 0.25].index.tolist()
+                analog_years_list = [yr for yr in portfolio_avg_z_by_year[portfolio_avg_z_by_year > 0.25].index.tolist() if yr < 2025]
             elif selected_scenario == 'ENSO Phase: La Niña':
-                analog_years_list = portfolio_avg_phase_by_year[portfolio_avg_phase_by_year == 'La Nina'].index.tolist()
+                analog_years_list = [yr for yr in portfolio_avg_phase_by_year[portfolio_avg_phase_by_year == 'La Nina'].index.tolist() if yr < 2025]
             elif selected_scenario == 'ENSO Phase: El Niño':
-                analog_years_list = portfolio_avg_phase_by_year[portfolio_avg_phase_by_year == 'El Nino'].index.tolist()
+                analog_years_list = [yr for yr in portfolio_avg_phase_by_year[portfolio_avg_phase_by_year == 'El Nino'].index.tolist() if yr < 2025]
             elif selected_scenario == 'ENSO Phase: Neutral':
-                analog_years_list = portfolio_avg_phase_by_year[portfolio_avg_phase_by_year == 'Neutral'].index.tolist()
+                analog_years_list = [yr for yr in portfolio_avg_phase_by_year[portfolio_avg_phase_by_year == 'Neutral'].index.tolist() if yr < 2025]
                 
             filtered_df = all_year_df[all_year_df['year'].isin(analog_years_list)].copy()
             
@@ -2921,20 +2925,22 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
         if opt_results.get('budget_enabled', False):
             acres_list = []
             for idx in display_alloc_df.index:
-                if idx == 'OPTIMIZED AVERAGE':
+                # Handle both possible average row names
+                if idx in ['OPTIMIZED AVERAGE', 'PORTFOLIO AVERAGE']:
                     acres_list.append(sum(display_acres.values()))
                 else:
                     acres_list.append(display_acres.get(idx, 0))
-            
+
             display_alloc_df['Acres'] = acres_list
-            
+
             cost_list = []
             for idx in display_alloc_df.index:
-                if idx == 'OPTIMIZED AVERAGE':
+                # Handle both possible average row names
+                if idx in ['OPTIMIZED AVERAGE', 'PORTFOLIO AVERAGE']:
                     cost_list.append(opt_results['annual_cost'])
                 else:
                     cost_list.append(opt_results['grid_costs'].get(idx, 0))
-            
+
             display_alloc_df['Annual Premium ($)'] = cost_list
 
         alloc_fig = create_optimized_allocation_table(
