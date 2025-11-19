@@ -1849,11 +1849,9 @@ def render_location_tab(session, all_grid_ids, common_params):
 
     if st.button("King Ranch Grids Preset", key="king_ranch_preset_btn"):
         if available_king_ranch_grids:
-            st.session_state['king_ranch_preset_active'] = True
             st.session_state['loc_grid_mode'] = 'Multiple Grids'
-            # Clear the multiselect session state to allow new default
-            if 'loc_multi_grid' in st.session_state:
-                del st.session_state['loc_multi_grid']
+            st.session_state['loc_multi_grid'] = available_king_ranch_grids
+            st.rerun()
         else:
             st.warning("No King Ranch grids found in the available grid list.")
 
@@ -1878,19 +1876,20 @@ def render_location_tab(session, all_grid_ids, common_params):
                 selected_grids = [selected_grid]
                 
         else:
-            # Determine default grids
-            if st.session_state.get('king_ranch_preset_active', False):
-                default_grids = available_king_ranch_grids if available_king_ranch_grids else all_grid_ids[:2]
-                st.session_state['king_ranch_preset_active'] = False  # Reset after use
+            # Only set default if there's no existing selection in session state
+            if 'loc_multi_grid' not in st.session_state:
+                selected_grids = st.multiselect(
+                    "Select Grids",
+                    all_grid_ids,
+                    default=all_grid_ids[:2] if len(all_grid_ids) >= 2 else all_grid_ids,
+                    key='loc_multi_grid'
+                )
             else:
-                default_grids = all_grid_ids[:2] if len(all_grid_ids) >= 2 else all_grid_ids
-
-            selected_grids = st.multiselect(
-                "Select Grids",
-                all_grid_ids,
-                default=default_grids,
-                key='loc_multi_grid'
-            )
+                selected_grids = st.multiselect(
+                    "Select Grids",
+                    all_grid_ids,
+                    key='loc_multi_grid'
+                )
         st.divider()
         
         st.markdown("### 🎯 Your Market View")
