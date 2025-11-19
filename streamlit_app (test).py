@@ -1547,8 +1547,6 @@ def create_optimized_allocation_table(detailed_alloc_df, grid_acres=None, grid_c
     display_df = detailed_alloc_df.copy()
     
     cols_to_show = INTERVAL_ORDER_11 + ['Row Sum']
-    if 'Pattern' in display_df.columns:
-        cols_to_show.append('Pattern')
     if budget_enabled and grid_acres is not None:
         cols_to_show.append('Acres')
     if budget_enabled and grid_costs is not None:
