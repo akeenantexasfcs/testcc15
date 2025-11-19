@@ -376,7 +376,7 @@ def create_download_button(fig, filename, key):
 def calculate_grid_quality_score(row):
     """
     Score grids on 1-10 scale combining:
-    - Analog years available (60% weight) 
+    - Analog years available (60% weight)
     - Portfolio Return (Cumulative_ROI) (40% weight)
     """
     occurrences = row['Occurrences']
@@ -388,15 +388,14 @@ def calculate_grid_quality_score(row):
         year_score = 10.0 * occurrences
     else:
         year_score = 0.0
-        
+
     cumulative_roi_decimal = row['Cumulative_ROI']
-    
-    if cumulative_roi_decimal > 5.0:
-        cumulative_roi_decimal = cumulative_roi_decimal / 100.0
-        
-    roi_score_normalized = max(0, min((cumulative_roi_decimal + 0.5) / 1.5, 1.0))
+
+    # Normalize ROI to 0-1 scale for scoring
+    # Design: 0% → 0.0, 100% → 0.5, 300% → 0.85, 500%+ → 1.0
+    roi_score_normalized = max(0, min(cumulative_roi_decimal / 5.0, 1.0))
     roi_score = roi_score_normalized * 40
-    
+
     raw_score = year_score + roi_score
     scaled_score = (raw_score / 100.0) * 9.0 + 1.0
     return scaled_score
@@ -2219,7 +2218,7 @@ def render_location_tab(session, all_grid_ids, common_params):
                             edited_df_to_save[col] = edited_df_to_save[col] / 100.0
                     st.session_state.tab2_results['grid_summary_with_selection'] = edited_df_to_save
                     st.success("Selections confirmed! You can now move to the 'Portfolio Backtest' tab.")
-            st.caption("💡 **Quality Score** combines Portfolio Return (40%) and Analog Year history (60%). Analog year scoring sharply penalizes years $<5$ and grants full points at $\ge 10$ years.")
+            st.caption("💡 **Quality Score** combines Portfolio Return (40%) and Analog Year history (60%). ROI reaches full points at 500%+. Analog year scoring sharply penalizes years $<5$ and grants full points at $\ge 10$ years.")
             
             st.divider()
             
