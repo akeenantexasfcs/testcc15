@@ -1556,26 +1556,34 @@ def create_optimized_allocation_table(detailed_alloc_df, grid_acres=None, grid_c
     
     cols_to_show = [c for c in cols_to_show if c in display_df.columns]
     plot_data = display_df[cols_to_show]
-    
+
+    # Create display labels for column headers (abbreviate long names)
+    col_display_labels = []
+    for col in cols_to_show:
+        if col == 'Annual Premium ($)':
+            col_display_labels.append('Annual\nPremium ($)')
+        else:
+            col_display_labels.append(col)
+
     n_cols = len(cols_to_show)
     n_rows = len(plot_data)
     fig_width = max(17, n_cols * 1.3)
     fig_height = max(4.5, n_rows * 0.75 + 1.5)
-    
+
     fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=100)
     ax.axis('tight')
     ax.axis('off')
-    
+
     cell_text = []
     cell_colors = []
-    
+
     for idx, row in plot_data.iterrows():
         row_text = []
         row_colors = []
-        
+
         for col in cols_to_show:
             val = row[col]
-            
+
             if col in INTERVAL_ORDER_11 or col == 'Row Sum':
                 text = f'{val:.0%}'
                 if col in INTERVAL_ORDER_11 and val > 0.001:
@@ -1596,20 +1604,20 @@ def create_optimized_allocation_table(detailed_alloc_df, grid_acres=None, grid_c
             else:
                 text = str(val)
                 row_colors.append('white')
-            
+
             row_text.append(text)
-        
+
         cell_text.append(row_text)
-        
+
         if 'OPTIMIZED AVERAGE' in idx or 'PORTFOLIO AVERAGE' in idx:
             cell_colors.append(['#BDBDBD'] * len(cols_to_show))
         else:
             cell_colors.append(row_colors)
-    
+
     table = ax.table(
         cellText=cell_text,
         rowLabels=plot_data.index,
-        colLabels=cols_to_show,
+        colLabels=col_display_labels,
         cellColours=cell_colors,
         cellLoc='center',
         rowLoc='left',
@@ -2885,7 +2893,7 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                 ax=ax,
                 annot_kws={"fontsize": 9}
             )
-            ax.set_title(f"ROI Correlation Matrix (Scenario: {display_scenario})", fontsize=12, fontweight='bold')
+            ax.set_title(f"ROI Correlation Matrix (Scenario: {display_scenario})", fontsize=10, fontweight='bold', pad=10)
             plt.yticks(rotation=0, fontsize=9)
             plt.xticks(rotation=45, ha='right', fontsize=9)
             plt.tight_layout()
