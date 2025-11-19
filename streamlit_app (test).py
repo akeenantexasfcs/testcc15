@@ -253,7 +253,7 @@ def filter_years_by_market_view(df, regime, hist_context, trend):
         dominant_phase = phase_counts.idxmax() if len(phase_counts) > 0 else None
         phase_intervals = phase_counts.max() if len(phase_counts) > 0 else 0
         
-        if dominant_phase != regime or phase_intervals < 4:
+        if dominant_phase != regime or phase_intervals < 5:
             continue
         
         year_avg_hist_z = year_data['SEQUENTIAL_Z_SCORE_HISTORICAL_RECORD'].mean()
