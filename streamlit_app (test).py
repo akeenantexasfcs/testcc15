@@ -1821,6 +1821,33 @@ def render_location_tab(session, all_grid_ids, common_params):
     st.markdown("Discover the best performing grid and allocation combinations based on your market view.")
     
     st.markdown("### 📍 Grid Selection")
+
+    # King Ranch Grids Preset Button
+    king_ranch_grids = [
+        "9128 (Kleberg - TX)",
+        "9129 (Kleberg - TX)",
+        "9130 (Kleberg - TX)",
+        "9131 (Kleberg - TX)",
+        "8828 (Kleberg - TX)",
+        "8829 (Kleberg - TX)",
+        "8830 (Kleberg - TX)",
+        "8831 (Kleberg - TX)",
+        "8528 (Brooks - TX)",
+        "8228 (Brooks - TX)",
+        "8229 (Brooks - TX)",
+        "8529 (Brooks - TX)",
+        "8829 (Kenedy - TX)",
+        "7929 (Kenedy - TX)",
+        "8230 (Kenedy - TX)",
+        "7930 (Kenedy - TX)",
+        "8231 (Kenedy - TX)",
+        "7931 (Kenedy - TX)"
+    ]
+
+    if st.button("King Ranch Grids Preset", key="king_ranch_preset_btn"):
+        st.session_state['loc_grid_mode'] = 'Multiple Grids'
+        st.session_state['loc_multi_grid'] = king_ranch_grids
+
     grid_mode = st.radio(
         "Analyze:",
         ['All Grids', 'Single Grid', 'Multiple Grids'],
