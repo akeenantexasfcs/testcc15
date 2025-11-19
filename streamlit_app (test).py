@@ -1720,14 +1720,13 @@ def create_allocation_changes_table(optimized_alloc_df, naive_alloc_df, selected
         
         plot_data['Acres Change'] = acres_changes
         cols_to_show.append('Acres Change')
-    
+
     n_cols = len(cols_to_show)
     n_rows = len(plot_data)
     fig_width = max(17, n_cols * 1.3)
     fig_height = max(4.5, n_rows * 0.75 + 1.5)
-    
+
     fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=100)
-    ax.axis('tight')
     ax.axis('off')
     
     cell_text = []
@@ -1802,10 +1801,16 @@ def create_allocation_changes_table(optimized_alloc_df, naive_alloc_df, selected
         
         if i > 0 and plot_data.index[i-1] == 'AVERAGE SHIFT':
             cell.set_text_props(weight='bold', fontsize=11)
-        
+
         cell.set_edgecolor('#757575')
         cell.set_linewidth(0.8)
-    
+
+    # Remove any potential overlapping text elements
+    ax.set_xlabel('')
+    ax.set_ylabel('')
+    ax.set_title('')
+    fig.texts.clear()
+
     plt.tight_layout(pad=2.0)
     return fig
 
