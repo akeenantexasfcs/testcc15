@@ -1844,9 +1844,18 @@ def render_location_tab(session, all_grid_ids, common_params):
         "7931 (Kenedy - TX)"
     ]
 
+    # Filter to only include grids that exist in the available list
+    available_king_ranch_grids = [g for g in king_ranch_grids if g in all_grid_ids]
+
     if st.button("King Ranch Grids Preset", key="king_ranch_preset_btn"):
-        st.session_state['loc_grid_mode'] = 'Multiple Grids'
-        st.session_state['loc_multi_grid'] = king_ranch_grids
+        if available_king_ranch_grids:
+            st.session_state['king_ranch_preset_active'] = True
+            st.session_state['loc_grid_mode'] = 'Multiple Grids'
+            # Clear the multiselect session state to allow new default
+            if 'loc_multi_grid' in st.session_state:
+                del st.session_state['loc_multi_grid']
+        else:
+            st.warning("No King Ranch grids found in the available grid list.")
 
     grid_mode = st.radio(
         "Analyze:",
@@ -1869,10 +1878,17 @@ def render_location_tab(session, all_grid_ids, common_params):
                 selected_grids = [selected_grid]
                 
         else:
+            # Determine default grids
+            if st.session_state.get('king_ranch_preset_active', False):
+                default_grids = available_king_ranch_grids if available_king_ranch_grids else all_grid_ids[:2]
+                st.session_state['king_ranch_preset_active'] = False  # Reset after use
+            else:
+                default_grids = all_grid_ids[:2] if len(all_grid_ids) >= 2 else all_grid_ids
+
             selected_grids = st.multiselect(
                 "Select Grids",
                 all_grid_ids,
-                default=all_grid_ids[:2] if len(all_grid_ids) >= 2 else all_grid_ids,
+                default=default_grids,
                 key='loc_multi_grid'
             )
         st.divider()
