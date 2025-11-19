@@ -1783,6 +1783,34 @@ def create_allocation_changes_table(optimized_weights, naive_alloc_df, selected_
     plt.tight_layout(pad=2.0)
     return fig
 
+def create_text_comparison_table(naive_metrics, opt_metrics):
+    """Create a clean, perfectly aligned text table."""
+    metrics_info = [
+        ('Total ROI', 'Cumulative_ROI', '{:.1%}'),
+        ('Risk-Adjusted Return', 'Risk_Adjusted_Return', '{:.2f}'),
+        ('Win Rate', 'Win_Rate', '{:.1%}'),
+        ('Standard Deviation', 'Std_Dev', '{:.1%}')
+    ]
+    max_label_len = max(len(label) for label, _, _ in metrics_info)
+    header = f"{'Metric':<{max_label_len}}  {'Naive':>12}  {'Optimized':>12}  {'Improvement':>12}"
+    divider = "=" * len(header)
+    rows = []
+    for label, key, fmt in metrics_info:
+        naive_val = naive_metrics.get(key, 0)
+        opt_val = opt_metrics.get(key, 0)
+        naive_str = fmt.format(naive_val)
+        opt_str = fmt.format(opt_val)
+        if key == 'Std_Dev':
+            diff = naive_val - opt_val
+            improvement_str = f"+{fmt.format(diff)}" if diff > 0 else fmt.format(diff)
+        else:
+            diff = opt_val - naive_val
+            improvement_str = f"+{fmt.format(diff)}" if diff > 0 else fmt.format(diff)
+        row = f"{label:<{max_label_len}}  {naive_str:>12}  {opt_str:>12}  {improvement_str:>12}"
+        rows.append(row)
+    table_text = "\n".join([divider, header, divider, *rows, divider])
+    return table_text
+
 # =============================================================================
 # === LOCATION ANALYSIS TAB (Tab 1) ===
 # =============================================================================
@@ -2978,53 +3006,10 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
         
         st.divider()
         
-        st.markdown("### 9. Optimized vs. Naive Performance Comparison")
-        
-        comparison_data = []
-        metrics_to_compare = [
-            'Cumulative_ROI', 'Risk_Adjusted_Return', 'Win_Rate', 'Std_Dev'
-        ]
-        metric_labels = [
-            'Total ROI', 'Risk-Adjusted Return (Sharpe Ratio)', 'Win Rate', 'Standard Deviation (Risk)'
-        ]
-        metric_formats = [
-            '{:.1%}', '{:.2f}', '{:.1%}', '{:.1%}'
-        ]
-        
-        for metric, label, fmt in zip(metrics_to_compare, metric_labels, metric_formats):
-            naive_val = naive_metrics.get(metric, 0)
-            opt_val = opt_metrics.get(metric, 0)
-            
-            if metric == 'Std_Dev':
-                # Lower std dev is better, so invert the difference
-                diff = naive_val - opt_val
-                comparison = f"{diff:+.1%}"
-            else:
-                diff = opt_val - naive_val
-                comparison = f"{diff:+.1%}" if metric in ['Cumulative_ROI', 'Win_Rate'] else f"{diff:+.2f}"
-            
-            comparison_data.append({
-                'Metric': label,
-                'Naive Portfolio': fmt.format(naive_val),
-                'Optimized Portfolio': fmt.format(opt_val),
-                'Improvement': comparison
-            })
-            
-        comparison_df = pd.DataFrame(comparison_data).set_index('Metric')
-        
-        def color_diff(val):
-            if isinstance(val, str) and val.startswith('+'):
-                return 'background-color: #DFF0D8'
-            elif isinstance(val, str) and val.startswith('-'):
-                return 'background-color: #F2DEDE'
-            return ''
-            
-        st.dataframe(
-            comparison_df.style
-                .applymap(color_diff, subset=['Improvement'])
-                .set_properties(**{'font-weight': 'bold'}, subset=['Optimized Portfolio']),
-            use_container_width=True
-        )
+        st.markdown("### 8. Optimized vs. Naive Performance Comparison")
+
+        comparison_text = create_text_comparison_table(naive_metrics, opt_metrics)
+        st.code(comparison_text, language=None)
         st.caption("💡 **Improvement** shows how much better the Optimized Portfolio performed. For Standard Deviation, a **positive value means risk was reduced** (better).")
         
         st.divider()
