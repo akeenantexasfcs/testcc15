@@ -1514,7 +1514,7 @@ def create_naive_allocation_heatmap(coverage_df):
         annot=True,
         fmt='.0%',
         cmap='Greens',
-        cbar_kws={'label': 'Allocation %', 'format': '%.0f%%'},
+        cbar=False,
         linewidths=0.5,
         linecolor='gray',
         vmin=0,
@@ -1639,37 +1639,47 @@ def create_optimized_allocation_table(detailed_alloc_df, grid_acres=None, grid_c
     plt.tight_layout(pad=2.0)
     return fig
 
-def create_allocation_changes_table(optimized_weights, naive_alloc_df, selected_grids, grid_acres_original=None, grid_acres_final=None, budget_enabled=False):
+def create_allocation_changes_table(optimized_alloc_df, naive_alloc_df, selected_grids, grid_acres_original=None, grid_acres_final=None, budget_enabled=False):
     """
     Creates a table showing allocation changes for each grid.
-    Compares each grid's INDIVIDUAL naive allocation to the OPTIMIZED allocation.
+    Compares each grid's INDIVIDUAL naive allocation to that SAME grid's INDIVIDUAL optimized allocation.
     Grids as rows, intervals as columns, showing percentage changes.
     Returns a matplotlib figure.
     """
     change_rows = []
-    
+
     for grid in selected_grids:
         row_dict = {'Grid': grid}
-        
+
+        # Get this grid's naive allocation
         if grid in naive_alloc_df.index:
             grid_naive = naive_alloc_df.loc[grid, INTERVAL_ORDER_11]
         else:
             grid_naive = naive_alloc_df.loc['AVERAGE', INTERVAL_ORDER_11]
-        
+
+        # Get this grid's optimized allocation (NOT the average!)
+        if grid in optimized_alloc_df.index:
+            grid_optimized = optimized_alloc_df.loc[grid, INTERVAL_ORDER_11]
+        else:
+            # Fallback to optimized average if grid not found
+            grid_optimized = optimized_alloc_df.loc['OPTIMIZED AVERAGE', INTERVAL_ORDER_11]
+
         net_change = 0
-        for i, interval in enumerate(INTERVAL_ORDER_11):
-            change = optimized_weights[i] - grid_naive[interval]
+        for interval in INTERVAL_ORDER_11:
+            change = grid_optimized[interval] - grid_naive[interval]
             row_dict[interval] = change
             net_change += change
-        
+
         row_dict['Net Change'] = net_change
         change_rows.append(row_dict)
-    
+
+    # Add average shift row (comparing portfolio averages)
     avg_naive = naive_alloc_df.loc['AVERAGE', INTERVAL_ORDER_11]
+    avg_optimized = optimized_alloc_df.loc['OPTIMIZED AVERAGE', INTERVAL_ORDER_11]
     avg_row = {'Grid': 'AVERAGE SHIFT'}
     net_change = 0
-    for i, interval in enumerate(INTERVAL_ORDER_11):
-        change = optimized_weights[i] - avg_naive[interval]
+    for interval in INTERVAL_ORDER_11:
+        change = avg_optimized[interval] - avg_naive[interval]
         avg_row[interval] = change
         net_change += change
     avg_row['Net Change'] = net_change
@@ -2921,7 +2931,7 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
         naive_alloc_df = st.session_state.cached_naive_coverage_df
         
         changes_fig = create_allocation_changes_table(
-            optimized_weights=optimized_weights_raw,
+            optimized_alloc_df=opt_detailed_df,
             naive_alloc_df=naive_alloc_df,
             selected_grids=selected_grids,
             grid_acres_original=grid_acres_original if opt_results.get('budget_enabled', False) else None,
@@ -2940,22 +2950,30 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                 
                 # CSV download
                 naive_alloc_df = st.session_state.cached_naive_coverage_df
-                
+
                 # Recreate the changes dataframe for CSV
                 change_rows = []
                 for grid in selected_grids:
                     row_dict = {'Grid': grid}
+
+                    # Get this grid's naive allocation
                     if grid in naive_alloc_df.index:
                         grid_naive = naive_alloc_df.loc[grid, INTERVAL_ORDER_11]
                     else:
                         grid_naive = naive_alloc_df.loc['AVERAGE', INTERVAL_ORDER_11]
-                    
+
+                    # Get this grid's optimized allocation
+                    if grid in opt_detailed_df.index:
+                        grid_optimized = opt_detailed_df.loc[grid, INTERVAL_ORDER_11]
+                    else:
+                        grid_optimized = opt_detailed_df.loc['OPTIMIZED AVERAGE', INTERVAL_ORDER_11]
+
                     net_change = 0
-                    for i, interval in enumerate(INTERVAL_ORDER_11):
-                        change = optimized_weights_raw[i] - grid_naive[interval]
+                    for interval in INTERVAL_ORDER_11:
+                        change = grid_optimized[interval] - grid_naive[interval]
                         row_dict[interval] = change
                         net_change += change
-                    
+
                     row_dict['Net Change'] = net_change
                     if opt_results.get('budget_enabled', False):
                         row_dict['Acres Change'] = grid_acres_final.get(grid, 0) - grid_acres_original.get(grid, 0)
