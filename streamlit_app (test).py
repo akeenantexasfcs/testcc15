@@ -2997,7 +2997,7 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
         st.divider()
         
         st.markdown("### 9. Optimized vs. Naive Performance Comparison")
-        
+
         comparison_data = []
         metrics_to_compare = [
             'Cumulative_ROI', 'Risk_Adjusted_Return', 'Win_Rate', 'Std_Dev'
@@ -3008,42 +3008,23 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
         metric_formats = [
             '{:.1%}', '{:.2f}', '{:.1%}', '{:.1%}'
         ]
-        
+
         for metric, label, fmt in zip(metrics_to_compare, metric_labels, metric_formats):
             naive_val = naive_metrics.get(metric, 0)
             opt_val = opt_metrics.get(metric, 0)
-            
-            if metric == 'Std_Dev':
-                # Lower std dev is better, so invert the difference
-                diff = naive_val - opt_val
-                comparison = f"{diff:+.1%}"
-            else:
-                diff = opt_val - naive_val
-                comparison = f"{diff:+.1%}" if metric in ['Cumulative_ROI', 'Win_Rate'] else f"{diff:+.2f}"
-            
+
+            diff = opt_val - naive_val
+            change = f"{diff:+.1%}" if metric in ['Cumulative_ROI', 'Win_Rate', 'Std_Dev'] else f"{diff:+.2f}"
+
             comparison_data.append({
                 'Metric': label,
                 'Naive Portfolio': fmt.format(naive_val),
                 'Optimized Portfolio': fmt.format(opt_val),
-                'Improvement': comparison
+                'Change': change
             })
-            
+
         comparison_df = pd.DataFrame(comparison_data).set_index('Metric')
-        
-        def color_diff(val):
-            if isinstance(val, str) and val.startswith('+'):
-                return 'background-color: #DFF0D8'
-            elif isinstance(val, str) and val.startswith('-'):
-                return 'background-color: #F2DEDE'
-            return ''
-            
-        st.dataframe(
-            comparison_df.style
-                .applymap(color_diff, subset=['Improvement'])
-                .set_properties(**{'font-weight': 'bold'}, subset=['Optimized Portfolio']),
-            use_container_width=True
-        )
-        st.caption("💡 **Improvement** shows how much better the Optimized Portfolio performed. For Standard Deviation, a **positive value means risk was reduced** (better).")
+        st.table(comparison_df)
         
         st.divider()
         
