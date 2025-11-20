@@ -1861,12 +1861,11 @@ def render_location_tab(session, all_grid_ids, common_params):
         if available_king_ranch_grids:
             st.session_state['loc_grid_mode'] = 'Multiple Grids'
             st.session_state['loc_multi_grid'] = available_king_ranch_grids
-            # Set King Ranch specific parameters
-            st.session_state['sidebar_coverage'] = 0.75
-            st.session_state['sidebar_prod'] = '135%'
             st.rerun()
         else:
             st.warning("No King Ranch grids found in the available grid list.")
+
+    st.caption("💡 **King Ranch Tip:** For optimal analysis, set **Coverage Level: 75%** and **Productivity Factor: 135%** in the sidebar.")
 
     grid_mode = st.radio(
         "Analyze:",
