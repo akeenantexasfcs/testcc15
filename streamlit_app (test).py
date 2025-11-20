@@ -3125,17 +3125,26 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                                         change_msg = f"removed {abs(acres_change):,.0f} acres ({acres_change_pct:.1f}%)"
 
                                     if budget_utilization >= 0.95:
-                                        st.success(f"✅ **Budget Fully Utilized:** Started with {initial_total_acres:,.0f} acres (${initial_cost:,.0f}), "
-                                                  f"optimized to {final_total_acres:,.0f} acres ({change_msg}) to maximize returns within "
-                                                  f"${annual_budget:,.0f} budget. Final cost: ${total_annual_cost:,.0f} ({budget_utilization:.1%}).")
+                                        st.success(
+                                            f"✅ **Budget Fully Utilized:**\n\n"
+                                            f"Started with {initial_total_acres:,.0f} acres (${initial_cost:,.0f})\n\n"
+                                            f"Optimized to {final_total_acres:,.0f} acres ({change_msg})\n\n"
+                                            f"Final cost: ${total_annual_cost:,.0f} ({budget_utilization:.1%}) of ${annual_budget:,.0f} budget"
+                                        )
                                     elif budget_utilization >= 0.70:
-                                        st.info(f"ℹ️ **Budget Optimization:** Started with {initial_total_acres:,.0f} acres, "
-                                               f"optimized to {final_total_acres:,.0f} acres ({change_msg}). "
-                                               f"Using ${total_annual_cost:,.0f} ({budget_utilization:.1%}) of ${annual_budget:,.0f} budget.")
+                                        st.info(
+                                            f"ℹ️ **Budget Optimization:**\n\n"
+                                            f"Started with {initial_total_acres:,.0f} acres\n\n"
+                                            f"Optimized to {final_total_acres:,.0f} acres ({change_msg})\n\n"
+                                            f"Using ${total_annual_cost:,.0f} ({budget_utilization:.1%}) of ${annual_budget:,.0f} budget"
+                                        )
                                     else:
-                                        st.warning(f"⚠️ **Low Budget Utilization:** Only using ${total_annual_cost:,.0f} ({budget_utilization:.1%}) of ${annual_budget:,.0f} budget. "
-                                                  f"Started with {initial_total_acres:,.0f} acres, ended with {final_total_acres:,.0f} acres. "
-                                                  f"Consider increasing max acres per grid or lowering budget target.")
+                                        st.warning(
+                                            f"⚠️ **Low Budget Utilization:**\n\n"
+                                            f"Only using ${total_annual_cost:,.0f} ({budget_utilization:.1%}) of ${annual_budget:,.0f} budget\n\n"
+                                            f"Started with {initial_total_acres:,.0f} acres, ended with {final_total_acres:,.0f} acres\n\n"
+                                            f"Consider increasing max acres per grid or lowering budget target"
+                                        )
                             except Exception as e:
                                 st.warning(f"⚠️ Budget optimization completed but summary calculation failed: {str(e)}")
 
@@ -3146,13 +3155,22 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                                 acres_change = final_total_acres - initial_total_acres
 
                                 if acres_change > 0:
-                                    st.success(f"✅ **Equal Scaling Applied:** Acres scaled up by {budget_scale_factor:.1%} to use full ${annual_budget:,.0f} budget. "
-                                              f"Total acres increased from {initial_total_acres:,.0f} to {final_total_acres:,.0f} (added {acres_change:,.0f} acres).")
+                                    st.success(
+                                        f"✅ **Equal Scaling Applied:**\n\n"
+                                        f"Acres scaled up by {budget_scale_factor:.1%} to use full ${annual_budget:,.0f} budget\n\n"
+                                        f"Total acres: {initial_total_acres:,.0f} → {final_total_acres:,.0f} (added {acres_change:,.0f} acres)"
+                                    )
                                 elif acres_change < 0:
-                                    st.warning(f"⚠️ **Equal Scaling Applied:** Acres scaled down by {budget_scale_factor:.1%} to meet ${annual_budget:,.0f} budget. "
-                                              f"Total acres reduced from {initial_total_acres:,.0f} to {final_total_acres:,.0f} (removed {abs(acres_change):,.0f} acres).")
+                                    st.warning(
+                                        f"⚠️ **Equal Scaling Applied:**\n\n"
+                                        f"Acres scaled down by {budget_scale_factor:.1%} to meet ${annual_budget:,.0f} budget\n\n"
+                                        f"Total acres: {initial_total_acres:,.0f} → {final_total_acres:,.0f} (removed {abs(acres_change):,.0f} acres)"
+                                    )
                                 else:
-                                    st.info(f"ℹ️ **Equal Scaling:** Acres already optimal for ${annual_budget:,.0f} budget ({initial_total_acres:,.0f} acres).")
+                                    st.info(
+                                        f"ℹ️ **Equal Scaling:**\n\n"
+                                        f"Acres already optimal for ${annual_budget:,.0f} budget ({initial_total_acres:,.0f} acres)"
+                                    )
                             except Exception:
                                 if budget_scale_factor > 1.0:
                                     st.success(f"✅ **Equal Scaling Applied:** Acres scaled up by {budget_scale_factor:.1%} to use full budget.")
