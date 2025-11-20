@@ -3240,8 +3240,8 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
         st.markdown(f"### 7. Optimized Interval Allocation (Max {optimization_goal})")
         
         if full_coverage:
-            pattern_A_grids = [g for i, g in enumerate(selected_grids) if 'Pattern' in opt_detailed_df.columns and 'A' in str(opt_detailed_df.loc[g, 'Pattern'])]
-            pattern_B_grids = [g for i, g in enumerate(selected_grids) if 'Pattern' in opt_detailed_df.columns and 'B' in str(opt_detailed_df.loc[g, 'Pattern'])]
+            pattern_A_grids = [g for i, g in enumerate(selected_grids) if 'Pattern' in opt_detailed_df.columns and g in opt_detailed_df.index and 'A' in str(opt_detailed_df.loc[g, 'Pattern'])]
+            pattern_B_grids = [g for i, g in enumerate(selected_grids) if 'Pattern' in opt_detailed_df.columns and g in opt_detailed_df.index and 'B' in str(opt_detailed_df.loc[g, 'Pattern'])]
             st.caption(f"✅ **Staggered Full Calendar Coverage**:\n"
                       f"- **Pattern A** ({len(pattern_A_grids)} grids): Jan-Feb, Mar-Apr, May-Jun, Jul-Aug, Sep-Oct, Nov-Dec (6 intervals, each 10%-50%)\n"
                       f"- **Pattern B** ({len(pattern_B_grids)} grids): Feb-Mar, Apr-May, Jun-Jul, Aug-Sep, Oct-Nov (5 intervals, each 10%-50%)")
