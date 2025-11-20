@@ -1999,7 +1999,8 @@ def render_location_tab(session, all_grid_ids, common_params):
 
             # Set sidebar parameters for King Ranch optimal settings
             st.session_state['sidebar_coverage'] = 0.75  # 75% Coverage Level
-            st.session_state['sidebar_prod'] = '135%'  # 135% Productivity Factor
+            st.session_state['sidebar_prod'] = '135%'  # 135% Productivity Factor (string format for selectbox)
+            st.session_state['productivity_factor'] = 1.35  # Also set the decimal value for consistency
 
             st.rerun()
         else:
@@ -2889,11 +2890,11 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
             st.markdown("**Acreage Allocation Method:**")
             allocation_method = st.radio(
                 "How should acres be distributed to meet the budget?",
-                ["Equal Scaling", "Optimize Distribution"],
+                ["Optimize Distribution", "Equal Scaling"],
                 index=0,
                 key='allocation_method',
                 horizontal=True,
-                help="Equal Scaling: Reduce all grids proportionally. Optimize: Use mean-variance optimization to find ideal distribution (each grid stays within 0 to its specified max)."
+                help="Optimize Distribution: Use mean-variance optimization to find ideal distribution that maximizes returns within budget. Equal Scaling: Scale all grids proportionally to use full budget."
             )
         else:
             allocation_method = None
@@ -3003,17 +3004,24 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
 
                         if enable_budget and annual_budget is not None and annual_budget > 0:
                             if allocation_method == "Equal Scaling":
-                                # Equal Scaling: Only run when OVER budget
+                                # Equal Scaling: ALWAYS run to optimize budget usage
+                                budget_applied = True
+                                allocation_method_used = "Equal Scaling"
+
                                 if total_annual_cost > annual_budget:
-                                    budget_applied = True
+                                    # Scale DOWN if over budget
                                     final_grid_acres, budget_scale_factor = apply_budget_constraint(
                                         grid_acres, total_annual_cost, annual_budget
                                     )
-                                    allocation_method_used = "Equal Scaling"
+                                else:
+                                    # Scale UP if under budget to use full budget
+                                    target_scale = annual_budget / total_annual_cost if total_annual_cost > 0 else 1.0
+                                    final_grid_acres = {grid: acres * target_scale for grid, acres in grid_acres.items()}
+                                    budget_scale_factor = target_scale
 
-                                    total_annual_cost, grid_cost_breakdown = calculate_annual_premium_cost(
-                                        optimized_weights_raw, selected_grids, final_grid_acres, session, common_params
-                                    )
+                                total_annual_cost, grid_cost_breakdown = calculate_annual_premium_cost(
+                                    optimized_weights_raw, selected_grids, final_grid_acres, session, common_params
+                                )
 
                             else:
                                 # Optimized Distribution: ALWAYS run to maximize objective
@@ -3136,10 +3144,21 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                             try:
                                 initial_total_acres = sum(grid_acres.values())
                                 final_total_acres = sum(final_grid_acres.values())
-                                st.warning(f"⚠️ **Budget constraint applied:** Acres scaled equally by {budget_scale_factor:.1%} to meet ${annual_budget:,.0f} budget. "
-                                          f"Total acres reduced from {initial_total_acres:,.0f} to {final_total_acres:,.0f}.")
+                                acres_change = final_total_acres - initial_total_acres
+
+                                if acres_change > 0:
+                                    st.success(f"✅ **Equal Scaling Applied:** Acres scaled up by {budget_scale_factor:.1%} to use full ${annual_budget:,.0f} budget. "
+                                              f"Total acres increased from {initial_total_acres:,.0f} to {final_total_acres:,.0f} (added {acres_change:,.0f} acres).")
+                                elif acres_change < 0:
+                                    st.warning(f"⚠️ **Equal Scaling Applied:** Acres scaled down by {budget_scale_factor:.1%} to meet ${annual_budget:,.0f} budget. "
+                                              f"Total acres reduced from {initial_total_acres:,.0f} to {final_total_acres:,.0f} (removed {abs(acres_change):,.0f} acres).")
+                                else:
+                                    st.info(f"ℹ️ **Equal Scaling:** Acres already optimal for ${annual_budget:,.0f} budget ({initial_total_acres:,.0f} acres).")
                             except Exception:
-                                st.warning(f"⚠️ **Budget constraint applied:** Acres scaled by {budget_scale_factor:.1%} to meet budget.")
+                                if budget_scale_factor > 1.0:
+                                    st.success(f"✅ **Equal Scaling Applied:** Acres scaled up by {budget_scale_factor:.1%} to use full budget.")
+                                else:
+                                    st.warning(f"⚠️ **Equal Scaling Applied:** Acres scaled down by {budget_scale_factor:.1%} to meet budget.")
 
                         elif budget_applied and "Fallback" in allocation_method_used:
                             st.info("ℹ️ Budget optimization encountered errors and used fallback proportional scaling.")
