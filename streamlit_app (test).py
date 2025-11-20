@@ -2575,9 +2575,9 @@ def render_location_tab(session, all_grid_ids, common_params):
                             'Trajectory_Delta': st.column_config.NumberColumn('Trajectory Δ', width='small', format="%.2f", help='EOY 5P minus SOY 11P (intra-year evolution)'),
                             'Coverage': st.column_config.NumberColumn('Coverage', width='small', format="%.0%%"),
                             'ROI': st.column_config.NumberColumn('ROI %', width='small', format="%.2%%"),
-                            'Indemnity': st.column_config.NumberColumn('Indemnity Paid', width='medium', format="$%,.2f"),
-                            'Producer_Premium': st.column_config.NumberColumn('Premium Cost', width='medium', format="$%,.2f"),
-                            'Net_Return': st.column_config.NumberColumn('Net Profit/Loss', width='medium', format="$%,.2f")
+                            'Indemnity': st.column_config.NumberColumn('Indemnity Paid', width='medium', format="$%.2f"),
+                            'Producer_Premium': st.column_config.NumberColumn('Premium Cost', width='medium', format="$%.2f"),
+                            'Net_Return': st.column_config.NumberColumn('Net Profit/Loss', width='medium', format="$%.2f")
                         }
                     )
                 else:
