@@ -1549,9 +1549,10 @@ def create_optimized_allocation_table(detailed_alloc_df, grid_acres=None, grid_c
     cols_to_show = INTERVAL_ORDER_11 + ['Row Sum']
     if 'Pattern' in display_df.columns:
         cols_to_show.append('Pattern')
-    if budget_enabled and grid_acres is not None:
+    # Always show Acres and Premium columns if they exist in the dataframe for full transparency
+    if 'Acres' in display_df.columns:
         cols_to_show.append('Acres')
-    if budget_enabled and grid_costs is not None:
+    if 'Annual Premium ($)' in display_df.columns:
         cols_to_show.append('Annual Premium ($)')
     
     cols_to_show = [c for c in cols_to_show if c in display_df.columns]
@@ -2692,6 +2693,18 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                     )
                     
                     if detailed_alloc_df is not None:
+                        # Calculate TRUE initial cost using NAIVE weights (before optimization)
+                        # This ensures "started with" matches the naive backtest cost
+                        naive_weights_array = naive_interval_weights[INTERVAL_ORDER_11].values
+                        naive_cost, naive_grid_cost_breakdown = calculate_annual_premium_cost(
+                            naive_weights_array, selected_grids, grid_acres, session, common_params
+                        )
+
+                        # Store as initial cost for budget comparison
+                        initial_cost = naive_cost
+                        initial_grid_cost_breakdown = naive_grid_cost_breakdown
+
+                        # Now calculate the optimized cost
                         total_annual_cost, grid_cost_breakdown = calculate_annual_premium_cost(
                             optimized_weights_raw, selected_grids, grid_acres, session, common_params
                         )
@@ -2749,6 +2762,8 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                             'final_grid_acres': final_grid_acres,
                             'annual_cost': total_annual_cost,
                             'grid_costs': grid_cost_breakdown,
+                            'initial_cost': initial_cost,
+                            'initial_grid_costs': initial_grid_cost_breakdown,
                             'budget_applied': budget_applied,
                             'budget_scale_factor': budget_scale_factor,
                             'budget_enabled': enable_budget,
