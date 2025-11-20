@@ -1955,10 +1955,36 @@ def render_location_tab(session, all_grid_ids, common_params):
     
     if 'tab2_run' not in st.session_state:
         st.session_state.tab2_run = False
-    
+
     if submitted:
         st.session_state.tab2_run = True
-        
+
+        # Clear cached results if key parameters have changed
+        if 'tab2_results' in st.session_state and st.session_state.tab2_results:
+            cached_params = st.session_state.tab2_results
+            params_changed = False
+            change_reasons = []
+
+            if cached_params.get('interval_range') != interval_range:
+                params_changed = True
+                change_reasons.append(f"Interval range: {cached_params.get('interval_range')} → {interval_range}")
+
+            if cached_params.get('regime') != regime:
+                params_changed = True
+                change_reasons.append(f"Regime: {cached_params.get('regime')} → {regime}")
+
+            if cached_params.get('hist_context') != hist_context:
+                params_changed = True
+                change_reasons.append(f"Historical context changed")
+
+            if cached_params.get('trend') != trend:
+                params_changed = True
+                change_reasons.append(f"Trend changed")
+
+            if params_changed:
+                st.session_state.tab2_results = None
+                st.info(f"🔄 Parameters changed. Clearing cached results:\n" + "\n".join(f"• {r}" for r in change_reasons))
+
         if not selected_grids:
             st.error("⚠️ Please select at least one grid to analyze")
             return
@@ -2121,7 +2147,8 @@ def render_location_tab(session, all_grid_ids, common_params):
                         'coverage_level': coverage_level,
                         'num_grids': len(selected_grids),
                         'grid_summary_with_selection': None,
-                        'sort_metric': sort_metric
+                        'sort_metric': sort_metric,
+                        'interval_range': interval_range
                     }
             
             if st.session_state.tab2_results is None:
@@ -2762,6 +2789,28 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                    "- Optimizer decides which grids use which pattern")
         
         if st.button(f"✨ Optimize Portfolio (Max {optimization_goal})", key="run_optimization_btn", type="primary"):
+            # Clear cached optimization results if key parameters have changed
+            if 'optimization_results' in st.session_state and st.session_state.optimization_results:
+                cached_opt_params = st.session_state.optimization_results
+                params_changed = False
+                change_reasons = []
+
+                if cached_opt_params.get('interval_range') != interval_range_opt:
+                    params_changed = True
+                    change_reasons.append(f"Interval range: {cached_opt_params.get('interval_range')} → {interval_range_opt}")
+
+                if cached_opt_params.get('optimization_goal') != optimization_goal:
+                    params_changed = True
+                    change_reasons.append(f"Optimization goal: {cached_opt_params.get('optimization_goal')} → {optimization_goal}")
+
+                if cached_opt_params.get('full_coverage') != require_full_coverage:
+                    params_changed = True
+                    change_reasons.append(f"Full coverage: {cached_opt_params.get('full_coverage')} → {require_full_coverage}")
+
+                if params_changed:
+                    st.session_state.optimization_results = None
+                    st.info(f"🔄 Optimization parameters changed. Clearing cached results:\n" + "\n".join(f"• {r}" for r in change_reasons))
+
             if 'portfolio_base_data' in st.session_state and not st.session_state.portfolio_base_data.empty:
                 
                 naive_interval_weights = st.session_state.cached_naive_coverage_df.loc['AVERAGE', INTERVAL_ORDER_11]
