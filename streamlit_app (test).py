@@ -2035,12 +2035,13 @@ def render_location_tab(session, all_grid_ids, common_params):
                             avg_shortage = (100 - np.mean(interval_data))
                             interval_scores[interval] = avg_shortage
 
-                    sorted_intervals = sorted(interval_scores.items(), key=lambda x: x[1], reverse=True)
-                    top_intervals = [x[0] for x in sorted_intervals[:8]]
+                    # Use all 11 intervals for strategy generation to ensure valid non-adjacent patterns
+                    # Shortage scores are still calculated for performance evaluation
+                    all_intervals = INTERVAL_ORDER_11
 
                     candidates = []
                     for num_intervals in range(min_intervals, max_intervals + 1):
-                        for combo in combinations(top_intervals, num_intervals):
+                        for combo in combinations(all_intervals, num_intervals):
                             if has_adjacent_intervals(list(combo)):
                                 continue
 
