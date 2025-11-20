@@ -1997,10 +1997,9 @@ def render_location_tab(session, all_grid_ids, common_params):
             st.session_state['loc_grid_mode'] = 'Multiple Grids'
             st.session_state['loc_multi_grid'] = available_king_ranch_grids
 
-            # Set sidebar parameters for King Ranch optimal settings
-            st.session_state['sidebar_coverage'] = 0.75  # 75% Coverage Level
-            st.session_state['sidebar_prod'] = '135%'  # 135% Productivity Factor (string format for selectbox)
-            st.session_state['productivity_factor'] = 1.35  # Also set the decimal value for consistency
+            # Set preset values using intermediate keys (not widget-bound keys)
+            st.session_state['preset_coverage'] = 0.75  # 75% Coverage Level
+            st.session_state['preset_prod_factor'] = 1.35  # 135% Productivity Factor (decimal)
 
             st.rerun()
         else:
@@ -3453,21 +3452,44 @@ def main():
     if 'insurance_plan_code' not in st.session_state:
         st.session_state.insurance_plan_code = 13
     
+    # Determine coverage level index - use preset if available
+    coverage_options = [0.70, 0.75, 0.80, 0.85, 0.90]
+    if 'preset_coverage' in st.session_state:
+        try:
+            coverage_index = coverage_options.index(st.session_state['preset_coverage'])
+            # Clear preset after using it once
+            del st.session_state['preset_coverage']
+        except ValueError:
+            coverage_index = 2  # Default to 80%
+    else:
+        coverage_index = 2  # Default to 80%
+
     coverage_level = st.sidebar.selectbox(
         "Coverage Level",
-        [0.70, 0.75, 0.80, 0.85, 0.90],
-        index=2,
+        coverage_options,
+        index=coverage_index,
         format_func=lambda x: f"{x:.0%}",
         key='sidebar_coverage'
     )
-    
+
+    # Determine productivity factor index - use preset if available
     prod_options = list(range(60, 151))
     prod_options_formatted = [f"{x}%" for x in prod_options]
-    try:
-        current_prod_index = prod_options.index(int(st.session_state.productivity_factor * 100))
-    except ValueError:
-        current_prod_index = 40
-    
+
+    if 'preset_prod_factor' in st.session_state:
+        try:
+            preset_prod_pct = int(st.session_state['preset_prod_factor'] * 100)
+            current_prod_index = prod_options.index(preset_prod_pct)
+            # Clear preset after using it once
+            del st.session_state['preset_prod_factor']
+        except ValueError:
+            current_prod_index = 40  # Default to 100%
+    else:
+        try:
+            current_prod_index = prod_options.index(int(st.session_state.productivity_factor * 100))
+        except ValueError:
+            current_prod_index = 40
+
     selected_prod_str = st.sidebar.selectbox(
         "Productivity Factor",
         options=prod_options_formatted,
