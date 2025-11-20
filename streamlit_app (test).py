@@ -1424,76 +1424,81 @@ def run_portfolio_optimization_wrapper(base_data_df, naive_allocation, optimizat
         return detailed_alloc_df, detailed_change_df, opt_metrics, final_weights
 
 # === GRID ALLOCATION OPTIMIZER (MEAN-VARIANCE) ===
-def optimize_grid_allocation(base_data_df, interval_weights, max_acres_per_grid, risk_aversion=1.0):
+def optimize_grid_allocation(base_data_df, interval_weights, max_acres_per_grid,
+                            annual_budget, session, common_params, selected_grids, risk_aversion=1.0):
     """
     Optimizes the acreage allocation across grids given a fixed interval strategy.
     Objective: Maximize Mean Return - Risk_Aversion * Variance
+    Subject to: Total Annual Premium Cost <= Annual Budget
     """
     grids = list(base_data_df['grid'].unique())
     num_grids = len(grids)
-    
+
     grid_roi_series = {}
-    
+
     for grid_id in grids:
         grid_data = base_data_df[base_data_df['grid'] == grid_id]
         M_ind, M_prem, years, _ = prepare_vectorized_data(grid_data, {grid_id: 1.0})
-        
+
         rec_ind = M_ind @ interval_weights
         rec_prem = M_prem @ interval_weights
-        
+
         df_g = pd.DataFrame({'year': years, 'ind': rec_ind, 'prem': rec_prem})
         g_sums = df_g.groupby('year').sum()
-        
+
         with np.errstate(divide='ignore', invalid='ignore'):
             rois = (g_sums['ind'] - g_sums['prem']) / g_sums['prem']
             rois = np.nan_to_num(rois, nan=0.0)
-            
+
         grid_roi_series[grid_id] = pd.Series(rois, index=g_sums.index)
 
     roi_df = pd.DataFrame(grid_roi_series).fillna(0)
-    
+
     expected_returns = roi_df.mean()
     cov_matrix = roi_df.cov()
-    
+
     def objective(acres_allocation):
-        max_acres_array = np.array([max_acres_per_grid.get(grid, 0) for grid in grids])
-        total_available_acres = np.sum(max_acres_array)
-        
-        weights = acres_allocation / total_available_acres
-        
+        # Calculate actual total acres being used
+        total_acres_used = np.sum(acres_allocation)
+
+        if total_acres_used == 0:
+            return 1e10
+
+        # Calculate weights based on actual acres used
+        weights = acres_allocation / total_acres_used
+
         port_ret = np.sum(expected_returns.values * weights)
         port_var = np.dot(weights.T, np.dot(cov_matrix.values, weights))
         utility = port_ret - (risk_aversion * port_var)
         return -utility
-    
+
+    def budget_constraint(acres_allocation):
+        # Calculate total premium cost for this allocation
+        acres_dict = dict(zip(grids, acres_allocation))
+        total_cost, _ = calculate_annual_premium_cost(
+            interval_weights, selected_grids, acres_dict,
+            session, common_params
+        )
+        # Return >= 0 when constraint is satisfied (cost <= budget)
+        return annual_budget - total_cost
+
     max_acres_array = np.array([max_acres_per_grid.get(grid, 0) for grid in grids])
-    total_available_acres = np.sum(max_acres_array)
-    
-    constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - total_available_acres})
-    
+
+    # Use budget constraint instead of forcing total acres
+    constraints = ({'type': 'ineq', 'fun': budget_constraint})
+
     bounds = tuple((0.0, float(max_acres_array[i])) for i in range(num_grids))
-    
-    init_guess = np.full(num_grids, total_available_acres / num_grids)
-    init_guess = np.minimum(init_guess, max_acres_array)
-    
-    if np.sum(init_guess) < total_available_acres:
-        remaining = total_available_acres - np.sum(init_guess)
-        for i in range(num_grids):
-            if init_guess[i] < max_acres_array[i]:
-                room = max_acres_array[i] - init_guess[i]
-                give = min(room, remaining)
-                init_guess[i] += give
-                remaining -= give
-                if remaining <= 0:
-                    break
-    
+
+    # Start from a feasible point (half of max acres)
+    init_guess = np.array([0.5 * max_acres_per_grid.get(grid, 0) for grid in grids])
+
     result = minimize(objective, init_guess, method='SLSQP', bounds=bounds, constraints=constraints)
-    
+
     if result.success:
         optimal_acres = result.x
     else:
         optimal_acres = init_guess
-        
+
     return dict(zip(grids, optimal_acres)), roi_df
 
 # =============================================================================
@@ -2881,23 +2886,15 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                                     st.session_state.portfolio_base_data,
                                     optimized_weights_raw,
                                     max_acres_per_grid=grid_acres,
+                                    annual_budget=annual_budget,
+                                    session=session,
+                                    common_params=common_params,
+                                    selected_grids=selected_grids,
                                     risk_aversion=1.0
                                 )
 
                                 final_grid_acres = grid_opt_results
-
-                                # Check if optimization result exceeds budget
-                                test_cost, _ = calculate_annual_premium_cost(
-                                    optimized_weights_raw, selected_grids, final_grid_acres, session, common_params
-                                )
-
-                                # Safety: If still over budget after optimization, scale down
-                                if test_cost > annual_budget:
-                                    scale = annual_budget / test_cost
-                                    final_grid_acres = {grid: acres * scale for grid, acres in final_grid_acres.items()}
-                                    budget_scale_factor = scale
-                                else:
-                                    budget_scale_factor = 1.0
+                                budget_scale_factor = 1.0
 
                                 total_annual_cost, grid_cost_breakdown = calculate_annual_premium_cost(
                                     optimized_weights_raw, selected_grids, final_grid_acres, session, common_params
