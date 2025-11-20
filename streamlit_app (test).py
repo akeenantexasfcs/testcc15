@@ -579,42 +579,61 @@ def fetch_and_process_all_grid_histories(_session, selected_grids, best_strategi
 
 def calculate_annual_premium_cost(allocation_weights, selected_grids, grid_acres, session, common_params):
     """
-    Calculate total annual premium cost using 2025 rates.
+    Calculate total annual premium cost using 2025 rates with validation.
     Returns: (total_cost, grid_breakdown_dict)
     """
     current_rate_year = get_current_rate_year(session)
     coverage_level = common_params['coverage_level']
-    
+
     grid_costs = {}
     total_cost = 0.0
-    
+
     for grid_id in selected_grids:
         grid_numeric = extract_numeric_grid_id(grid_id)
-        
+
+        # Load data with validation
         cbv = load_county_base_value(session, grid_id)
         premiums = load_premium_rates(session, grid_numeric, common_params['intended_use'],
                                       coverage_level, current_rate_year)
         subsidy = load_subsidy(session, common_params['plan_code'], coverage_level)
         if subsidy > 1.0:
             subsidy /= 100.0
-        
+
         acres = grid_acres.get(grid_id, 0)
         prod_factor = common_params['productivity_factor']
-        
+
+        # Validate inputs
+        if cbv is None or cbv <= 0 or np.isnan(cbv):
+            continue  # Skip grids with invalid CBV
+
+        if acres <= 0 or np.isnan(acres) or np.isinf(acres):
+            continue  # Skip grids with invalid acres
+
         dollar_protection_per_acre = cbv * coverage_level * prod_factor
-        
+
         grid_cost = 0.0
         for i, interval in enumerate(INTERVAL_ORDER_11):
             interval_weight = allocation_weights[i]
             if interval_weight > 0.001:
                 premium_rate = premiums.get(interval, 0)
-                if premium_rate > 0:
+                if premium_rate > 0 and not np.isnan(premium_rate):
                     interval_premium = dollar_protection_per_acre * premium_rate * acres * (1 - subsidy)
-                    grid_cost += interval_weight * interval_premium
-        
-        grid_costs[grid_id] = grid_cost
-        total_cost += grid_cost
-    
+
+                    # Validate interval premium
+                    if not np.isnan(interval_premium) and not np.isinf(interval_premium):
+                        grid_cost += interval_weight * interval_premium
+
+        # Validate grid cost before adding
+        if not np.isnan(grid_cost) and not np.isinf(grid_cost) and grid_cost >= 0:
+            grid_costs[grid_id] = grid_cost
+            total_cost += grid_cost
+        else:
+            grid_costs[grid_id] = 0.0
+
+    # Final validation
+    if np.isnan(total_cost) or np.isinf(total_cost) or total_cost < 0:
+        total_cost = 0.0
+
     return total_cost, grid_costs
 
 def apply_budget_constraint(grid_acres, total_cost, budget_limit):
@@ -1424,12 +1443,19 @@ def run_portfolio_optimization_wrapper(base_data_df, naive_allocation, optimizat
         return detailed_alloc_df, detailed_change_df, opt_metrics, final_weights
 
 # === GRID ALLOCATION OPTIMIZER (MEAN-VARIANCE) ===
-def optimize_grid_allocation(base_data_df, interval_weights, max_acres_per_grid,
+def optimize_grid_allocation(base_data_df, interval_weights, initial_acres_per_grid,
                             annual_budget, session, common_params, selected_grids, risk_aversion=1.0):
     """
-    Two-stage optimization:
+    Two-stage optimization with robust error handling:
     Stage 1: Find the maximum total acres that fit within budget
     Stage 2: Optimize distribution of those acres for best risk-adjusted returns
+
+    Args:
+        initial_acres_per_grid: Dict of {grid_id: acres} - STARTING point, not hard cap
+        annual_budget: Maximum annual premium cost
+
+    Returns:
+        (optimized_acres_dict, roi_df) or raises ValueError on failure
     """
     grids = list(base_data_df['grid'].unique())
     num_grids = len(grids)
@@ -1455,30 +1481,41 @@ def optimize_grid_allocation(base_data_df, interval_weights, max_acres_per_grid,
     roi_df = pd.DataFrame(grid_roi_series).fillna(0)
     expected_returns = roi_df.mean()
     cov_matrix = roi_df.cov()
-    max_acres_array = np.array([max_acres_per_grid.get(grid, 0) for grid in grids])
+
+    # Get initial acres array (use as reference, not hard cap)
+    initial_acres_array = np.array([initial_acres_per_grid.get(grid, 100.0) for grid in grids])
+
+    # Set reasonable upper bounds (10x initial acres or 10,000, whichever is larger)
+    max_acres_array = np.maximum(initial_acres_array * 10.0, 10000.0)
 
     # STAGE 1: Find maximum total acres within budget using binary search
     def calculate_cost_for_allocation(acres_allocation):
         """Helper to calculate total cost for a given allocation"""
-        acres_dict = dict(zip(grids, acres_allocation))
-        total_cost, _ = calculate_annual_premium_cost(
-            interval_weights, selected_grids, acres_dict,
-            session, common_params
-        )
-        return total_cost
+        try:
+            acres_dict = dict(zip(grids, acres_allocation))
+            total_cost, _ = calculate_annual_premium_cost(
+                interval_weights, selected_grids, acres_dict,
+                session, common_params
+            )
+            # Validate cost
+            if np.isnan(total_cost) or np.isinf(total_cost) or total_cost < 0:
+                return 1e10  # Return very high cost if invalid
+            return total_cost
+        except Exception:
+            return 1e10  # Return very high cost on error
 
     # Start with proportional allocation based on expected returns
     # Give more acres to better-performing grids
     if expected_returns.sum() > 0:
         weights = expected_returns.values / expected_returns.sum()
-        weights = np.maximum(weights, 0.1)  # Ensure minimum 10% per grid
+        weights = np.maximum(weights, 0.05)  # Ensure minimum 5% per grid
         weights = weights / weights.sum()  # Re-normalize
     else:
         weights = np.ones(num_grids) / num_grids
 
     # Binary search to find the scale factor that gets us closest to budget
-    low_scale = 0.0
-    high_scale = 1.0
+    low_scale = 0.1  # Start at 10% of max acres
+    high_scale = 100.0  # Allow up to 100x scaling
 
     # First check if max acres is under budget
     test_alloc = max_acres_array.copy()
@@ -1489,82 +1526,110 @@ def optimize_grid_allocation(base_data_df, interval_weights, max_acres_per_grid,
         optimal_acres = max_acres_array.copy()
     else:
         # Binary search for the right scale factor
-        best_scale = 0.0
-        for _ in range(50):  # 50 iterations should be plenty
+        best_scale = 1.0
+        best_alloc = initial_acres_array.copy()
+
+        for iteration in range(60):  # 60 iterations for precision
             mid_scale = (low_scale + high_scale) / 2.0
-            test_alloc = max_acres_array * weights * mid_scale / np.sum(weights * mid_scale) * np.sum(max_acres_array)
+
+            # Scale initial allocation proportionally by returns-based weights
+            test_alloc = initial_acres_array * mid_scale * weights / weights.mean()
             test_alloc = np.minimum(test_alloc, max_acres_array)  # Respect max per grid
+            test_alloc = np.maximum(test_alloc, 1.0)  # Ensure at least 1 acre per grid
 
             test_cost = calculate_cost_for_allocation(test_alloc)
 
-            if test_cost < annual_budget * 0.99:  # Target 99% of budget
+            if test_cost < annual_budget * 0.98:  # Target 98% of budget
                 low_scale = mid_scale
                 best_scale = mid_scale
-            else:
+                best_alloc = test_alloc.copy()
+            elif test_cost > annual_budget * 1.02:  # Over budget
                 high_scale = mid_scale
+            else:  # Within 2% of budget - good enough!
+                best_alloc = test_alloc.copy()
+                break
 
-        # Use the best scale found
-        optimal_acres = max_acres_array * weights * best_scale / np.sum(weights * best_scale) * np.sum(max_acres_array)
-        optimal_acres = np.minimum(optimal_acres, max_acres_array)
+        optimal_acres = best_alloc
+
+    # Validate Stage 1 result
+    if np.any(np.isnan(optimal_acres)) or np.any(np.isinf(optimal_acres)) or np.any(optimal_acres < 0):
+        # Fallback: equal distribution within budget
+        optimal_acres = np.ones(num_grids) * (annual_budget / (num_grids * 100.0))
 
     # STAGE 2: Fine-tune distribution for better risk-adjusted returns
     def objective_stage2(acres_allocation):
         """Optimize for utility while staying near budget target"""
-        total_acres_used = np.sum(acres_allocation)
-        if total_acres_used < 0.01:
+        try:
+            total_acres_used = np.sum(acres_allocation)
+            if total_acres_used < 0.01:
+                return 1e10
+
+            weights_alloc = acres_allocation / total_acres_used
+            port_ret = np.sum(expected_returns.values * weights_alloc)
+            port_var = np.dot(weights_alloc.T, np.dot(cov_matrix.values, weights_alloc))
+            utility = port_ret - (risk_aversion * port_var)
+
+            if np.isnan(utility) or np.isinf(utility):
+                return 1e10
+
+            return -utility
+        except Exception:
             return 1e10
-
-        weights_alloc = acres_allocation / total_acres_used
-        port_ret = np.sum(expected_returns.values * weights_alloc)
-        port_var = np.dot(weights_alloc.T, np.dot(cov_matrix.values, weights_alloc))
-        utility = port_ret - (risk_aversion * port_var)
-
-        return -utility
 
     def budget_constraint_stage2(acres_allocation):
         """Must stay within budget"""
-        acres_dict = dict(zip(grids, acres_allocation))
-        total_cost, _ = calculate_annual_premium_cost(
-            interval_weights, selected_grids, acres_dict,
-            session, common_params
-        )
-        return annual_budget - total_cost
+        try:
+            total_cost = calculate_cost_for_allocation(acres_allocation)
+            return annual_budget - total_cost
+        except Exception:
+            return -1e10  # Violated constraint
 
     def budget_target_constraint(acres_allocation):
-        """Encourage using at least 95% of budget"""
-        acres_dict = dict(zip(grids, acres_allocation))
-        total_cost, _ = calculate_annual_premium_cost(
-            interval_weights, selected_grids, acres_dict,
-            session, common_params
-        )
-        return total_cost - (annual_budget * 0.95)
+        """Encourage using at least 90% of budget (relaxed from 95%)"""
+        try:
+            total_cost = calculate_cost_for_allocation(acres_allocation)
+            return total_cost - (annual_budget * 0.90)
+        except Exception:
+            return -1e10  # Violated constraint
 
-    bounds = tuple((0.0, float(max_acres_array[i])) for i in range(num_grids))
+    bounds = tuple((1.0, float(max_acres_array[i])) for i in range(num_grids))
 
     constraints = [
         {'type': 'ineq', 'fun': budget_constraint_stage2},  # Cost <= budget
-        {'type': 'ineq', 'fun': budget_target_constraint}   # Cost >= 95% budget
+        {'type': 'ineq', 'fun': budget_target_constraint}   # Cost >= 90% budget
     ]
 
-    result = minimize(
-        objective_stage2,
-        optimal_acres,
-        method='SLSQP',
-        bounds=bounds,
-        constraints=constraints,
-        options={'maxiter': 100, 'ftol': 1e-6}
-    )
+    # Try Stage 2 optimization with error handling
+    try:
+        result = minimize(
+            objective_stage2,
+            optimal_acres,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 150, 'ftol': 1e-6}
+        )
 
-    if result.success:
-        final_acres = result.x
-        # Verify it's using the budget
-        final_cost = calculate_cost_for_allocation(final_acres)
-        if final_cost < annual_budget * 0.90:  # If less than 90%, something went wrong
-            final_acres = optimal_acres  # Fall back to Stage 1 result
-    else:
-        final_acres = optimal_acres  # Fall back to Stage 1 result
+        if result.success and result.x is not None:
+            # Validate result
+            if not (np.any(np.isnan(result.x)) or np.any(np.isinf(result.x)) or np.any(result.x < 0)):
+                final_acres = result.x
+                final_cost = calculate_cost_for_allocation(final_acres)
 
-    return dict(zip(grids, final_acres)), roi_df
+                # If cost is valid and within budget, use Stage 2 result
+                if not np.isnan(final_cost) and 0 < final_cost <= annual_budget:
+                    optimal_acres = final_acres
+                # else: fall back to Stage 1
+        # else: fall back to Stage 1
+    except Exception as e:
+        # Stage 2 failed, use Stage 1 result
+        pass
+
+    # Final validation before returning
+    if np.any(np.isnan(optimal_acres)) or np.any(np.isinf(optimal_acres)) or np.any(optimal_acres < 0):
+        raise ValueError("Optimization produced invalid acres allocation. Check grid data (CBV, premium rates).")
+
+    return dict(zip(grids, optimal_acres)), roi_df
 
 # =============================================================================
 # === VISUALIZATION HELPER FUNCTIONS ===
@@ -2943,23 +3008,51 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                                 budget_applied = True
                                 allocation_method_used = "Optimized Distribution"
 
-                                grid_opt_results, _ = optimize_grid_allocation(
-                                    st.session_state.portfolio_base_data,
-                                    optimized_weights_raw,
-                                    max_acres_per_grid=grid_acres,
-                                    annual_budget=annual_budget,
-                                    session=session,
-                                    common_params=common_params,
-                                    selected_grids=selected_grids,
-                                    risk_aversion=1.0
-                                )
+                                try:
+                                    grid_opt_results, _ = optimize_grid_allocation(
+                                        st.session_state.portfolio_base_data,
+                                        optimized_weights_raw,
+                                        initial_acres_per_grid=grid_acres,
+                                        annual_budget=annual_budget,
+                                        session=session,
+                                        common_params=common_params,
+                                        selected_grids=selected_grids,
+                                        risk_aversion=1.0
+                                    )
 
-                                final_grid_acres = grid_opt_results
-                                budget_scale_factor = 1.0
+                                    # Validate optimization results
+                                    if not isinstance(grid_opt_results, dict):
+                                        raise TypeError(f"Expected dict, got {type(grid_opt_results)}")
 
-                                total_annual_cost, grid_cost_breakdown = calculate_annual_premium_cost(
-                                    optimized_weights_raw, selected_grids, final_grid_acres, session, common_params
-                                )
+                                    for grid, acres in grid_opt_results.items():
+                                        if np.isnan(acres) or np.isinf(acres) or acres < 0:
+                                            raise ValueError(f"Invalid acres for {grid}: {acres}")
+
+                                    final_grid_acres = grid_opt_results
+                                    budget_scale_factor = 1.0
+
+                                    total_annual_cost, grid_cost_breakdown = calculate_annual_premium_cost(
+                                        optimized_weights_raw, selected_grids, final_grid_acres, session, common_params
+                                    )
+
+                                    # Validate cost calculation
+                                    if np.isnan(total_annual_cost) or total_annual_cost <= 0:
+                                        raise ValueError("Cost calculation failed. Check grid data (County Base Values, Premium Rates).")
+
+                                except Exception as e:
+                                    st.error(f"⚠️ Optimization failed: {str(e)}. Using proportional scaling instead.")
+                                    # Fallback to Equal Scaling
+                                    if total_annual_cost > annual_budget:
+                                        final_grid_acres, budget_scale_factor = apply_budget_constraint(
+                                            grid_acres, total_annual_cost, annual_budget
+                                        )
+                                        allocation_method_used = "Equal Scaling (Fallback)"
+                                        total_annual_cost, grid_cost_breakdown = calculate_annual_premium_cost(
+                                            optimized_weights_raw, selected_grids, final_grid_acres, session, common_params
+                                        )
+                                    else:
+                                        final_grid_acres = grid_acres.copy()
+                                        allocation_method_used = "No Optimization (Error)"
                         
                         # Calculate initial cost (before budget optimization)
                         initial_cost, _ = calculate_annual_premium_cost(
@@ -2987,24 +3080,53 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                         }
 
                         if budget_applied and allocation_method_used == "Optimized Distribution":
-                            # Calculate what initial cost would have been
-                            budget_utilization = total_annual_cost / annual_budget
+                            # Calculate acres change with defensive formatting
+                            try:
+                                initial_total_acres = sum(grid_acres.values())
+                                final_total_acres = sum(final_grid_acres.values())
+                                acres_change = final_total_acres - initial_total_acres
+                                acres_change_pct = (acres_change / initial_total_acres * 100) if initial_total_acres > 0 else 0
 
-                            if budget_utilization >= 0.95:
-                                st.success(f"✅ **Budget Fully Utilized:** Optimizer allocated acres to use "
-                                          f"${total_annual_cost:,.0f} ({budget_utilization:.1%}) of your ${annual_budget:,.0f} budget. "
-                                          f"Initial allocation would have cost ${initial_cost:,.0f}.")
-                            elif budget_utilization >= 0.70:
-                                st.info(f"ℹ️ **Budget Optimization:** Using ${total_annual_cost:,.0f} "
-                                       f"({budget_utilization:.1%}) of ${annual_budget:,.0f} budget. "
-                                       f"Could not fully utilize budget while respecting grid maximums.")
-                            else:
-                                st.warning(f"⚠️ **Low Budget Utilization:** Only using ${total_annual_cost:,.0f} "
-                                          f"({budget_utilization:.1%}) of ${annual_budget:,.0f} budget. "
-                                          f"Consider increasing max acres per grid or lowering budget target.")
+                                # Defensive formatting for costs
+                                if np.isnan(total_annual_cost) or np.isnan(annual_budget) or annual_budget <= 0:
+                                    st.error("⚠️ **Cost Calculation Error:** Unable to calculate budget utilization. Check grid data.")
+                                else:
+                                    budget_utilization = total_annual_cost / annual_budget
+
+                                    # Format the change message
+                                    if abs(acres_change) < 1:
+                                        change_msg = "maintained"
+                                    elif acres_change > 0:
+                                        change_msg = f"added {acres_change:,.0f} acres (+{acres_change_pct:.1f}%)"
+                                    else:
+                                        change_msg = f"removed {abs(acres_change):,.0f} acres ({acres_change_pct:.1f}%)"
+
+                                    if budget_utilization >= 0.95:
+                                        st.success(f"✅ **Budget Fully Utilized:** Started with {initial_total_acres:,.0f} acres (${initial_cost:,.0f}), "
+                                                  f"optimized to {final_total_acres:,.0f} acres ({change_msg}) to maximize returns within "
+                                                  f"${annual_budget:,.0f} budget. Final cost: ${total_annual_cost:,.0f} ({budget_utilization:.1%}).")
+                                    elif budget_utilization >= 0.70:
+                                        st.info(f"ℹ️ **Budget Optimization:** Started with {initial_total_acres:,.0f} acres, "
+                                               f"optimized to {final_total_acres:,.0f} acres ({change_msg}). "
+                                               f"Using ${total_annual_cost:,.0f} ({budget_utilization:.1%}) of ${annual_budget:,.0f} budget.")
+                                    else:
+                                        st.warning(f"⚠️ **Low Budget Utilization:** Only using ${total_annual_cost:,.0f} ({budget_utilization:.1%}) of ${annual_budget:,.0f} budget. "
+                                                  f"Started with {initial_total_acres:,.0f} acres, ended with {final_total_acres:,.0f} acres. "
+                                                  f"Consider increasing max acres per grid or lowering budget target.")
+                            except Exception as e:
+                                st.warning(f"⚠️ Budget optimization completed but summary calculation failed: {str(e)}")
+
                         elif budget_applied and allocation_method_used == "Equal Scaling":
-                            st.warning(f"⚠️ **Budget constraint applied:** Acres scaled equally by {budget_scale_factor:.1%} to meet ${annual_budget:,.0f} budget. "
-                                      f"Total acres reduced from {sum(grid_acres.values()):,.0f} to {sum(final_grid_acres.values()):,.0f}.")
+                            try:
+                                initial_total_acres = sum(grid_acres.values())
+                                final_total_acres = sum(final_grid_acres.values())
+                                st.warning(f"⚠️ **Budget constraint applied:** Acres scaled equally by {budget_scale_factor:.1%} to meet ${annual_budget:,.0f} budget. "
+                                          f"Total acres reduced from {initial_total_acres:,.0f} to {final_total_acres:,.0f}.")
+                            except Exception:
+                                st.warning(f"⚠️ **Budget constraint applied:** Acres scaled by {budget_scale_factor:.1%} to meet budget.")
+
+                        elif budget_applied and "Fallback" in allocation_method_used:
+                            st.info("ℹ️ Budget optimization encountered errors and used fallback proportional scaling.")
 
                         st.success(f"✅ Portfolio Optimization Complete!")
                     else:
