@@ -3129,21 +3129,21 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                                             f"✅ **Budget Fully Utilized:**\n\n"
                                             f"Started with {initial_total_acres:,.0f} acres (${initial_cost:,.0f})\n\n"
                                             f"Optimized to {final_total_acres:,.0f} acres ({change_msg})\n\n"
-                                            f"Final cost: ${total_annual_cost:,.0f} ({budget_utilization:.1%}) of ${annual_budget:,.0f} budget"
+                                            f"Using ${total_annual_cost:,.0f}"
                                         )
                                     elif budget_utilization >= 0.70:
                                         st.info(
                                             f"ℹ️ **Budget Optimization:**\n\n"
                                             f"Started with {initial_total_acres:,.0f} acres\n\n"
                                             f"Optimized to {final_total_acres:,.0f} acres ({change_msg})\n\n"
-                                            f"Using ${total_annual_cost:,.0f} ({budget_utilization:.1%}) of ${annual_budget:,.0f} budget"
+                                            f"Using ${total_annual_cost:,.0f}"
                                         )
                                     else:
                                         st.warning(
                                             f"⚠️ **Low Budget Utilization:**\n\n"
-                                            f"Only using ${total_annual_cost:,.0f} ({budget_utilization:.1%}) of ${annual_budget:,.0f} budget\n\n"
-                                            f"Started with {initial_total_acres:,.0f} acres, ended with {final_total_acres:,.0f} acres\n\n"
-                                            f"Consider increasing max acres per grid or lowering budget target"
+                                            f"Started with {initial_total_acres:,.0f} acres\n\n"
+                                            f"Optimized to {final_total_acres:,.0f} acres ({change_msg})\n\n"
+                                            f"Using ${total_annual_cost:,.0f}"
                                         )
                             except Exception as e:
                                 st.warning(f"⚠️ Budget optimization completed but summary calculation failed: {str(e)}")
