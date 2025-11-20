@@ -2856,40 +2856,49 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                         budget_scale_factor = 1.0
                         budget_applied = False
                         allocation_method_used = "None"
-                        
+
                         if enable_budget and annual_budget is not None:
-                            if total_annual_cost > annual_budget:
-                                budget_applied = True
-                                
-                                if allocation_method == "Equal Scaling":
+                            if allocation_method == "Equal Scaling":
+                                # Equal Scaling: Only run when OVER budget
+                                if total_annual_cost > annual_budget:
+                                    budget_applied = True
                                     final_grid_acres, budget_scale_factor = apply_budget_constraint(
                                         grid_acres, total_annual_cost, annual_budget
                                     )
                                     allocation_method_used = "Equal Scaling"
-                                    
-                                else:
-                                    grid_opt_results, _ = optimize_grid_allocation(
-                                        st.session_state.portfolio_base_data,
-                                        optimized_weights_raw,
-                                        max_acres_per_grid=grid_acres,
-                                        risk_aversion=1.0
-                                    )
-                                    
-                                    final_grid_acres = grid_opt_results
-                                    
-                                    test_cost, _ = calculate_annual_premium_cost(
+
+                                    total_annual_cost, grid_cost_breakdown = calculate_annual_premium_cost(
                                         optimized_weights_raw, selected_grids, final_grid_acres, session, common_params
                                     )
-                                    
-                                    if test_cost <= annual_budget:
-                                        budget_scale_factor = 1.0
-                                    else:
-                                        scale = annual_budget / test_cost
-                                        final_grid_acres = {grid: acres * scale for grid, acres in final_grid_acres.items()}
-                                        budget_scale_factor = scale
-                                    
-                                    allocation_method_used = "Optimized Distribution"
-                                
+
+                            else:
+                                # Optimized Distribution: ALWAYS run to maximize objective
+                                # Whether over or under budget, optimize allocation
+                                budget_applied = True
+                                allocation_method_used = "Optimized Distribution"
+
+                                grid_opt_results, _ = optimize_grid_allocation(
+                                    st.session_state.portfolio_base_data,
+                                    optimized_weights_raw,
+                                    max_acres_per_grid=grid_acres,
+                                    risk_aversion=1.0
+                                )
+
+                                final_grid_acres = grid_opt_results
+
+                                # Check if optimization result exceeds budget
+                                test_cost, _ = calculate_annual_premium_cost(
+                                    optimized_weights_raw, selected_grids, final_grid_acres, session, common_params
+                                )
+
+                                # Safety: If still over budget after optimization, scale down
+                                if test_cost > annual_budget:
+                                    scale = annual_budget / test_cost
+                                    final_grid_acres = {grid: acres * scale for grid, acres in final_grid_acres.items()}
+                                    budget_scale_factor = scale
+                                else:
+                                    budget_scale_factor = 1.0
+
                                 total_annual_cost, grid_cost_breakdown = calculate_annual_premium_cost(
                                     optimized_weights_raw, selected_grids, final_grid_acres, session, common_params
                                 )
