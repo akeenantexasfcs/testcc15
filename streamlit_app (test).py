@@ -1428,14 +1428,20 @@ def optimize_grid_allocation(base_data_df, interval_weights, max_acres_per_grid,
                             annual_budget, session, common_params, selected_grids, risk_aversion=1.0):
     """
     Optimizes the acreage allocation across grids given a fixed interval strategy.
+
+    NEW BEHAVIOR:
+    - If cost < budget: Add acres to maximize returns up to budget limit
+    - If cost > budget: Remove acres to get under budget
+    - Always tries to use full budget while respecting max acres per grid
+
     Objective: Maximize Mean Return - Risk_Aversion * Variance
     Subject to: Total Annual Premium Cost <= Annual Budget
     """
     grids = list(base_data_df['grid'].unique())
     num_grids = len(grids)
 
+    # Calculate ROI series for each grid
     grid_roi_series = {}
-
     for grid_id in grids:
         grid_data = base_data_df[base_data_df['grid'] == grid_id]
         M_ind, M_prem, years, _ = prepare_vectorized_data(grid_data, {grid_id: 1.0})
@@ -1453,50 +1459,78 @@ def optimize_grid_allocation(base_data_df, interval_weights, max_acres_per_grid,
         grid_roi_series[grid_id] = pd.Series(rois, index=g_sums.index)
 
     roi_df = pd.DataFrame(grid_roi_series).fillna(0)
-
     expected_returns = roi_df.mean()
     cov_matrix = roi_df.cov()
 
     def objective(acres_allocation):
-        # Calculate actual total acres being used
+        """
+        Maximize utility with penalty for unused budget.
+        This incentivizes using the full budget.
+        """
         total_acres_used = np.sum(acres_allocation)
 
-        if total_acres_used == 0:
+        if total_acres_used < 0.01:
             return 1e10
 
-        # Calculate weights based on actual acres used
-        weights = acres_allocation / total_acres_used
+        # Calculate current cost
+        acres_dict = dict(zip(grids, acres_allocation))
+        current_cost, _ = calculate_annual_premium_cost(
+            interval_weights, selected_grids, acres_dict,
+            session, common_params
+        )
 
+        # Calculate portfolio utility
+        weights = acres_allocation / total_acres_used
         port_ret = np.sum(expected_returns.values * weights)
         port_var = np.dot(weights.T, np.dot(cov_matrix.values, weights))
         utility = port_ret - (risk_aversion * port_var)
-        return -utility
+
+        # Add penalty for unused budget (encourages using full budget)
+        budget_utilization = current_cost / annual_budget if annual_budget > 0 else 0
+        budget_penalty = -10.0 * (1.0 - budget_utilization)  # Penalty for not using budget
+
+        return -(utility + budget_penalty)  # Minimize negative utility
 
     def budget_constraint(acres_allocation):
-        # Calculate total premium cost for this allocation
+        """Budget constraint: cost must be <= budget"""
         acres_dict = dict(zip(grids, acres_allocation))
         total_cost, _ = calculate_annual_premium_cost(
             interval_weights, selected_grids, acres_dict,
             session, common_params
         )
-        # Return >= 0 when constraint is satisfied (cost <= budget)
-        return annual_budget - total_cost
+        return annual_budget - total_cost  # Must be >= 0
 
     max_acres_array = np.array([max_acres_per_grid.get(grid, 0) for grid in grids])
 
-    # Use budget constraint instead of forcing total acres
     constraints = ({'type': 'ineq', 'fun': budget_constraint})
-
     bounds = tuple((0.0, float(max_acres_array[i])) for i in range(num_grids))
 
-    # Start from a feasible point (half of max acres)
-    init_guess = np.array([0.5 * max_acres_per_grid.get(grid, 0) for grid in grids])
+    # Smart initial guess: Start high to encourage budget usage
+    # Begin with 80% of max acres (likely over budget, will be optimized down)
+    init_guess = np.array([0.8 * max_acres_per_grid.get(grid, 0) for grid in grids])
 
-    result = minimize(objective, init_guess, method='SLSQP', bounds=bounds, constraints=constraints)
+    # If initial guess is over budget, scale it down to be feasible
+    init_cost, _ = calculate_annual_premium_cost(
+        interval_weights, selected_grids, dict(zip(grids, init_guess)),
+        session, common_params
+    )
+    if init_cost > annual_budget:
+        scale = annual_budget / init_cost * 0.95  # 95% of budget as starting point
+        init_guess = init_guess * scale
+
+    result = minimize(
+        objective,
+        init_guess,
+        method='SLSQP',
+        bounds=bounds,
+        constraints=constraints,
+        options={'maxiter': 200, 'ftol': 1e-8}
+    )
 
     if result.success:
         optimal_acres = result.x
     else:
+        # Fallback: proportionally allocate to hit budget
         optimal_acres = init_guess
 
     return dict(zip(grids, optimal_acres)), roi_df
@@ -2767,11 +2801,11 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
         
         optimization_goal = st.radio(
             "Select Optimization Goal:",
-            ['Risk-Adjusted Return', 'Cumulative ROI'],
+            ['Cumulative ROI', 'Risk-Adjusted Return'],
             index=0,
             key='optimization_goal_select',
             horizontal=True,
-            help="Choose whether to maximize Sharpe Ratio (Risk-Adjusted Return) or maximize the simple total return (Cumulative ROI) over the scenario."
+            help="Choose whether to maximize the simple total return (Cumulative ROI) or maximize Sharpe Ratio (Risk-Adjusted Return) over the scenario."
         )
         
         st.markdown("**Diversification Constraints:**")
@@ -2896,6 +2930,11 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                                     optimized_weights_raw, selected_grids, final_grid_acres, session, common_params
                                 )
                         
+                        # Calculate initial cost (before budget optimization)
+                        initial_cost, _ = calculate_annual_premium_cost(
+                            optimized_weights_raw, selected_grids, grid_acres, session, common_params
+                        )
+
                         opt_metrics['Scenario'] = display_scenario
                         st.session_state.optimization_results = {
                             'allocation_detailed': detailed_alloc_df,
@@ -2912,15 +2951,26 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                             'budget_enabled': enable_budget,
                             'allocation_method_used': allocation_method_used,
                             'full_coverage': require_full_coverage,
-                            'interval_range': interval_range_opt
+                            'interval_range': interval_range_opt,
+                            'initial_cost': initial_cost
                         }
-                        
-                        if budget_applied:
-                            if allocation_method_used == "Equal Scaling":
-                                st.warning(f"⚠️ Budget constraint applied: Acres scaled equally by {budget_scale_factor:.1%} to meet ${annual_budget:,.0f} budget. Total acres reduced from {sum(grid_acres.values()):,.0f} to {sum(final_grid_acres.values()):,.0f}.")
+
+                        if budget_applied and allocation_method_used == "Optimized Distribution":
+                            if total_annual_cost < annual_budget * 0.98:  # More than 2% under budget
+                                st.info(f"ℹ️ **Budget Optimization Applied:** Initial acres would cost ${initial_cost:,.0f}. "
+                                        f"Optimizer ADDED acres (up to grid maximums) to utilize your ${annual_budget:,.0f} budget. "
+                                        f"Final cost: ${total_annual_cost:,.0f} ({total_annual_cost/annual_budget:.1%} of budget used).")
+                            elif total_annual_cost > annual_budget * 1.02:  # More than 2% over initial budget (shouldn't happen but safety check)
+                                st.warning(f"⚠️ **Budget Constraint Applied:** Initial acres would cost ${initial_cost:,.0f}. "
+                                           f"Optimizer REDUCED acres to meet your ${annual_budget:,.0f} budget. "
+                                           f"Final cost: ${total_annual_cost:,.0f}.")
                             else:
-                                st.warning(f"⚠️ Budget constraint applied: Acres optimally distributed (respecting max per grid) to meet ${annual_budget:,.0f} budget. Each grid allocated 0 to its specified maximum.")
-                            
+                                st.success(f"✅ **Budget Optimized:** Portfolio uses ${total_annual_cost:,.0f} "
+                                          f"({total_annual_cost/annual_budget:.1%} of your ${annual_budget:,.0f} budget).")
+                        elif budget_applied and allocation_method_used == "Equal Scaling":
+                            st.warning(f"⚠️ **Budget constraint applied:** Acres scaled equally by {budget_scale_factor:.1%} to meet ${annual_budget:,.0f} budget. "
+                                      f"Total acres reduced from {sum(grid_acres.values()):,.0f} to {sum(final_grid_acres.values()):,.0f}.")
+
                         st.success(f"✅ Portfolio Optimization Complete!")
                     else:
                         st.error("Optimization failed to find a valid solution. Try a different scenario/grid combination.")
