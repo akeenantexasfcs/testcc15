@@ -1996,11 +1996,16 @@ def render_location_tab(session, all_grid_ids, common_params):
         if available_king_ranch_grids:
             st.session_state['loc_grid_mode'] = 'Multiple Grids'
             st.session_state['loc_multi_grid'] = available_king_ranch_grids
+
+            # Set sidebar parameters for King Ranch optimal settings
+            st.session_state['sidebar_coverage'] = 0.75  # 75% Coverage Level
+            st.session_state['sidebar_prod'] = '135%'  # 135% Productivity Factor
+
             st.rerun()
         else:
             st.warning("No King Ranch grids found in the available grid list.")
 
-    st.caption("💡 **King Ranch Tip:** For optimal analysis, set **Coverage Level: 75%** and **Productivity Factor: 135%** in the sidebar.")
+    st.caption("💡 **King Ranch Preset:** Automatically sets grids, **Coverage Level: 75%**, and **Productivity Factor: 135%**.")
 
     grid_mode = st.radio(
         "Analyze:",
@@ -2979,16 +2984,24 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                     )
                     
                     if detailed_alloc_df is not None:
-                        total_annual_cost, grid_cost_breakdown = calculate_annual_premium_cost(
+                        # Calculate initial cost (before any budget optimization)
+                        initial_cost, initial_grid_cost_breakdown = calculate_annual_premium_cost(
                             optimized_weights_raw, selected_grids, grid_acres, session, common_params
                         )
-                        
+
+                        # Validate initial cost
+                        if np.isnan(initial_cost) or initial_cost < 0:
+                            st.error("⚠️ Initial cost calculation failed. Check grid data (County Base Values, Premium Rates).")
+                            st.stop()
+
+                        total_annual_cost = initial_cost
+                        grid_cost_breakdown = initial_grid_cost_breakdown
                         final_grid_acres = grid_acres.copy()
                         budget_scale_factor = 1.0
                         budget_applied = False
-                        allocation_method_used = "None"
+                        allocation_method_used = "None (Budget Disabled)"
 
-                        if enable_budget and annual_budget is not None:
+                        if enable_budget and annual_budget is not None and annual_budget > 0:
                             if allocation_method == "Equal Scaling":
                                 # Equal Scaling: Only run when OVER budget
                                 if total_annual_cost > annual_budget:
@@ -3040,24 +3053,27 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                                         raise ValueError("Cost calculation failed. Check grid data (County Base Values, Premium Rates).")
 
                                 except Exception as e:
-                                    st.error(f"⚠️ Optimization failed: {str(e)}. Using proportional scaling instead.")
-                                    # Fallback to Equal Scaling
-                                    if total_annual_cost > annual_budget:
+                                    st.error(f"⚠️ Optimization failed: {str(e)}. Using fallback allocation.")
+                                    # Fallback to Equal Scaling if over budget, else keep original
+                                    if initial_cost > annual_budget:
                                         final_grid_acres, budget_scale_factor = apply_budget_constraint(
-                                            grid_acres, total_annual_cost, annual_budget
+                                            grid_acres, initial_cost, annual_budget
                                         )
                                         allocation_method_used = "Equal Scaling (Fallback)"
                                         total_annual_cost, grid_cost_breakdown = calculate_annual_premium_cost(
                                             optimized_weights_raw, selected_grids, final_grid_acres, session, common_params
                                         )
+
+                                        # Validate fallback cost
+                                        if np.isnan(total_annual_cost) or total_annual_cost < 0:
+                                            total_annual_cost = initial_cost
+                                            final_grid_acres = grid_acres.copy()
+                                            allocation_method_used = "None (Optimization Failed)"
                                     else:
+                                        # Under budget but optimization failed - keep original
                                         final_grid_acres = grid_acres.copy()
-                                        allocation_method_used = "No Optimization (Error)"
-                        
-                        # Calculate initial cost (before budget optimization)
-                        initial_cost, _ = calculate_annual_premium_cost(
-                            optimized_weights_raw, selected_grids, grid_acres, session, common_params
-                        )
+                                        total_annual_cost = initial_cost
+                                        allocation_method_used = "None (Optimization Failed)"
 
                         opt_metrics['Scenario'] = display_scenario
                         st.session_state.optimization_results = {
