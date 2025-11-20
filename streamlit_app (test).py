@@ -2003,15 +2003,15 @@ def render_location_tab(session, all_grid_ids, common_params):
                 min_intervals, max_intervals = interval_range
                 for grid_id_display in selected_grids:
                     grid_id_numeric = extract_numeric_grid_id(grid_id_display)
-                    
+
                     df = load_all_indices(session, grid_id_numeric)
                     matching_years_info = filter_years_by_market_view(df, regime, hist_context, trend)
-                    
+
                     if not matching_years_info:
                         continue
-                    
+
                     matching_years = [y['year'] for y in matching_years_info]
-                    
+
                     static_data = {
                         'county_base_value': load_county_base_value(session, grid_id_display),
                         'premiums': load_premium_rates(session, grid_id_numeric, common_params['intended_use'],
@@ -2019,7 +2019,7 @@ def render_location_tab(session, all_grid_ids, common_params):
                         'subsidy': load_subsidy(session, common_params['plan_code'], coverage_level),
                         'acres': common_params['total_insured_acres']
                     }
-                    
+
                     interval_scores = {}
                     for interval in INTERVAL_ORDER_11:
                         interval_data = []
@@ -2028,23 +2028,23 @@ def render_location_tab(session, all_grid_ids, common_params):
                             row = year_data[year_data['INTERVAL_NAME'] == interval]
                             if not row.empty:
                                 interval_data.append(row['INDEX_VALUE'].iloc[0])
-                        
+
                         if interval_data:
                             avg_shortage = (100 - np.mean(interval_data))
                             interval_scores[interval] = avg_shortage
-                    
+
                     sorted_intervals = sorted(interval_scores.items(), key=lambda x: x[1], reverse=True)
                     top_intervals = [x[0] for x in sorted_intervals[:8]]
-                    
+
                     candidates = []
                     for num_intervals in range(min_intervals, max_intervals + 1):
                         for combo in combinations(top_intervals, num_intervals):
                             if has_adjacent_intervals(list(combo)):
                                 continue
-                            
+
                             allocations = generate_allocations(list(combo), num_intervals)
                             candidates.extend(allocations)
-                    
+
                     unique_candidates = []
                     seen = set()
                     for candidate in candidates:
@@ -2052,28 +2052,31 @@ def render_location_tab(session, all_grid_ids, common_params):
                         if key not in seen:
                             seen.add(key)
                             unique_candidates.append(candidate)
-                    
+
+                    # Track if we found any valid strategy for this grid
+                    grid_has_valid_strategy = False
+
                     for allocation in unique_candidates:
                         year_rois = []
                         year_indemnities = []
                         year_premiums = []
-                        
+
                         for year_info in matching_years_info:
                             year = year_info['year']
                             year_data = df[df['YEAR'] == year]
                             if len(year_data) >= 11:
                                 roi, indemnity, premium = calculate_yearly_roi(year_data, allocation, static_data, coverage_level)
-                                
+
                                 if roi is not None and not np.isinf(roi):
                                     year_rois.append(roi)
                                     year_indemnities.append(indemnity)
                                     year_premiums.append(premium)
-                                    
+
                                     net_return = indemnity - premium
                                     alloc_str_detail = ", ".join([f"{k}: {v*100:.0f}%" for k, v in sorted(allocation.items(),
                                                                                                           key=lambda x: x[1],
                                                                                                           reverse=True) if v > 0])
-                                    
+
                                     all_year_details.append({
                                         'Grid': grid_id_display,
                                         'Year': year,
@@ -2090,32 +2093,33 @@ def render_location_tab(session, all_grid_ids, common_params):
                                         'Producer_Premium': premium,
                                         'Net_Return': net_return
                                     })
-                        
+
                         if year_rois:
+                            grid_has_valid_strategy = True
                             avg_roi = np.mean(year_rois)
                             median_roi = np.median(year_rois)
                             std_dev = np.std(year_rois)
                             win_rate = np.sum(1 for r in year_rois if r > 0) / len(year_rois)
-                            
+
                             total_indemnity = np.sum(year_indemnities)
                             total_premium = np.sum(year_premiums)
                             if total_premium > 0:
                                 cumulative_roi = (total_indemnity - total_premium) / total_premium
                             else:
                                 cumulative_roi = 0.0
-                            
+
                             if std_dev > 0:
                                 risk_adjusted_return = avg_roi / std_dev
                             else:
                                 risk_adjusted_return = 0.0
-                            
+
                             alloc_str = ", ".join([f"{k}: {v*100:.0f}%" for k, v in sorted(allocation.items(),
                                                                                            key=lambda x: x[1],
                                                                                            reverse=True) if v > 0])
-                            
+
                             max_roi = np.max(year_rois)
                             min_roi = np.min(year_rois)
-                            
+
                             all_combinations.append({
                                 'Grid_ID': grid_id_display,
                                 'Allocation': alloc_str,
@@ -2131,6 +2135,24 @@ def render_location_tab(session, all_grid_ids, common_params):
                                 'Min_ROI': min_roi,
                                 'Best_Worst_Range': max_roi - min_roi
                             })
+
+                    # If grid has matching years but no valid strategy, add placeholder
+                    if not grid_has_valid_strategy and matching_years_info:
+                        all_combinations.append({
+                            'Grid_ID': grid_id_display,
+                            'Allocation': f'No valid {min_intervals}-{max_intervals} interval strategy',
+                            'Num_Intervals': 0,
+                            'Occurrences': len(matching_years_info),
+                            'Average_ROI': 0.0,
+                            'Cumulative_ROI': 0.0,
+                            'Median_ROI': 0.0,
+                            'Risk_Adjusted_Return': 0.0,
+                            'Win_Rate': 0.0,
+                            'Std_Dev': 0.0,
+                            'Max_ROI': 0.0,
+                            'Min_ROI': 0.0,
+                            'Best_Worst_Range': 0.0
+                        })
                 
                 if not all_combinations:
                     st.session_state.tab2_results = None
