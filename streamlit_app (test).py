@@ -2997,8 +2997,10 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                             st.error("⚠️ Initial cost calculation failed. Check grid data (County Base Values, Premium Rates).")
                             st.stop()
 
-                        total_annual_cost = initial_cost
-                        grid_cost_breakdown = initial_grid_cost_breakdown
+                        # Calculate optimized cost using OPTIMIZED weights (not naive)
+                        total_annual_cost, grid_cost_breakdown = calculate_annual_premium_cost(
+                            optimized_weights_raw, selected_grids, grid_acres, session, common_params
+                        )
                         final_grid_acres = grid_acres.copy()
                         budget_scale_factor = 1.0
                         budget_applied = False
@@ -3439,20 +3441,7 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
             '{:.1%}', '{:.2f}', '{:.1%}', '{:.1%}'
         ]
 
-        # Calculate average annual premiums
-        naive_avg_premium = naive_metrics['Total_Premium'] / naive_metrics['Analog_Years'] if naive_metrics['Analog_Years'] > 0 else 0
-        optimized_annual_premium = opt_results.get('annual_cost', 0)
-        premium_change = optimized_annual_premium - naive_avg_premium
-        premium_change_pct = (premium_change / naive_avg_premium * 100) if naive_avg_premium > 0 else 0
-
-        # Add premium comparison row
-        comparison_data.append({
-            'Metric': 'Estimated Annual Premium',
-            'Naive Portfolio': f'${naive_avg_premium:,.0f}',
-            'Optimized Portfolio': f'${optimized_annual_premium:,.0f}',
-            'Change': f'${premium_change:+,.0f} ({premium_change_pct:+.1f}%)'
-        })
-
+        # First add performance metrics
         for metric, label, fmt in zip(metrics_to_compare, metric_labels, metric_formats):
             naive_val = naive_metrics.get(metric, 0)
             opt_val = opt_metrics.get(metric, 0)
@@ -3466,6 +3455,19 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                 'Optimized Portfolio': fmt.format(opt_val),
                 'Change': change
             })
+
+        # Calculate and add premium comparison row (at the end)
+        naive_avg_premium = naive_metrics['Total_Premium'] / naive_metrics['Analog_Years'] if naive_metrics['Analog_Years'] > 0 else 0
+        optimized_annual_premium = opt_results.get('annual_cost', 0)
+        premium_change = optimized_annual_premium - naive_avg_premium
+        premium_change_pct = (premium_change / naive_avg_premium * 100) if naive_avg_premium > 0 else 0
+
+        comparison_data.append({
+            'Metric': 'Estimated Annual Premium',
+            'Naive Portfolio': f'${naive_avg_premium:,.0f}',
+            'Optimized Portfolio': f'${optimized_annual_premium:,.0f}',
+            'Change': f'${premium_change:+,.0f} ({premium_change_pct:+.1f}%)'
+        })
 
         comparison_df = pd.DataFrame(comparison_data).set_index('Metric')
         st.table(comparison_df)
