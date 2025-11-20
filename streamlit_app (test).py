@@ -253,7 +253,7 @@ def filter_years_by_market_view(df, regime, hist_context, trend):
         dominant_phase = phase_counts.idxmax() if len(phase_counts) > 0 else None
         phase_intervals = phase_counts.max() if len(phase_counts) > 0 else 0
         
-        if dominant_phase != regime or phase_intervals < 4:
+        if dominant_phase != regime or phase_intervals < 5:
             continue
         
         year_avg_hist_z = year_data['SEQUENTIAL_Z_SCORE_HISTORICAL_RECORD'].mean()
@@ -322,33 +322,36 @@ def calculate_yearly_roi(year_indices_df, allocation, static_data, coverage_leve
     for interval, pct in allocation.items():
         if pct <= 0:
             continue
-        
-        row = year_indices_df[year_indices_df['INTERVAL_NAME'] == interval]
-        if row.empty:
-            continue
-        
-        try:
-            index_value = float(row['INDEX_VALUE'].iloc[0])
-            if pd.isna(index_value):
-                continue
-        except (ValueError, TypeError):
-            continue
-            
+
         premium_rate = premiums.get(interval, 0)
-        
+
         if premium_rate <= 0:
             continue
 
         interval_protection = total_protection * pct
         total_premium = interval_protection * premium_rate
         producer_premium = total_premium - (total_premium * subsidy)
-        
+
+        # Premium is always charged based on allocation, regardless of data availability
+        total_producer_premium += max(0, producer_premium)
+
+        # Indemnity only calculated if index data exists for this year
+        row = year_indices_df[year_indices_df['INTERVAL_NAME'] == interval]
+        if row.empty:
+            continue
+
+        try:
+            index_value = float(row['INDEX_VALUE'].iloc[0])
+            if pd.isna(index_value):
+                continue
+        except (ValueError, TypeError):
+            continue
+
         trigger = coverage_level * 100
         shortfall_pct = max(0, (trigger - index_value) / trigger)
         indemnity = shortfall_pct * interval_protection
-        
-        total_indemnity += indemnity
-        total_producer_premium += max(0, producer_premium) 
+
+        total_indemnity += indemnity 
     
     if total_producer_premium == 0:
         if total_indemnity > 0:
@@ -376,7 +379,7 @@ def create_download_button(fig, filename, key):
 def calculate_grid_quality_score(row):
     """
     Score grids on 1-10 scale combining:
-    - Analog years available (60% weight) 
+    - Analog years available (60% weight)
     - Portfolio Return (Cumulative_ROI) (40% weight)
     """
     occurrences = row['Occurrences']
@@ -388,15 +391,14 @@ def calculate_grid_quality_score(row):
         year_score = 10.0 * occurrences
     else:
         year_score = 0.0
-        
+
     cumulative_roi_decimal = row['Cumulative_ROI']
-    
-    if cumulative_roi_decimal > 5.0:
-        cumulative_roi_decimal = cumulative_roi_decimal / 100.0
-        
-    roi_score_normalized = max(0, min((cumulative_roi_decimal + 0.5) / 1.5, 1.0))
+
+    # Normalize ROI to 0-1 scale for scoring
+    # Design: 0% → 0.0, 100% → 0.5, 300% → 0.85, 500%+ → 1.0
+    roi_score_normalized = max(0, min(cumulative_roi_decimal / 5.0, 1.0))
     roi_score = roi_score_normalized * 40
-    
+
     raw_score = year_score + roi_score
     scaled_score = (raw_score / 100.0) * 9.0 + 1.0
     return scaled_score
@@ -577,42 +579,61 @@ def fetch_and_process_all_grid_histories(_session, selected_grids, best_strategi
 
 def calculate_annual_premium_cost(allocation_weights, selected_grids, grid_acres, session, common_params):
     """
-    Calculate total annual premium cost using 2025 rates.
+    Calculate total annual premium cost using 2025 rates with validation.
     Returns: (total_cost, grid_breakdown_dict)
     """
     current_rate_year = get_current_rate_year(session)
     coverage_level = common_params['coverage_level']
-    
+
     grid_costs = {}
     total_cost = 0.0
-    
+
     for grid_id in selected_grids:
         grid_numeric = extract_numeric_grid_id(grid_id)
-        
+
+        # Load data with validation
         cbv = load_county_base_value(session, grid_id)
         premiums = load_premium_rates(session, grid_numeric, common_params['intended_use'],
                                       coverage_level, current_rate_year)
         subsidy = load_subsidy(session, common_params['plan_code'], coverage_level)
         if subsidy > 1.0:
             subsidy /= 100.0
-        
+
         acres = grid_acres.get(grid_id, 0)
         prod_factor = common_params['productivity_factor']
-        
+
+        # Validate inputs
+        if cbv is None or cbv <= 0 or np.isnan(cbv):
+            continue  # Skip grids with invalid CBV
+
+        if acres <= 0 or np.isnan(acres) or np.isinf(acres):
+            continue  # Skip grids with invalid acres
+
         dollar_protection_per_acre = cbv * coverage_level * prod_factor
-        
+
         grid_cost = 0.0
         for i, interval in enumerate(INTERVAL_ORDER_11):
             interval_weight = allocation_weights[i]
             if interval_weight > 0.001:
                 premium_rate = premiums.get(interval, 0)
-                if premium_rate > 0:
+                if premium_rate > 0 and not np.isnan(premium_rate):
                     interval_premium = dollar_protection_per_acre * premium_rate * acres * (1 - subsidy)
-                    grid_cost += interval_weight * interval_premium
-        
-        grid_costs[grid_id] = grid_cost
-        total_cost += grid_cost
-    
+
+                    # Validate interval premium
+                    if not np.isnan(interval_premium) and not np.isinf(interval_premium):
+                        grid_cost += interval_weight * interval_premium
+
+        # Validate grid cost before adding
+        if not np.isnan(grid_cost) and not np.isinf(grid_cost) and grid_cost >= 0:
+            grid_costs[grid_id] = grid_cost
+            total_cost += grid_cost
+        else:
+            grid_costs[grid_id] = 0.0
+
+    # Final validation
+    if np.isnan(total_cost) or np.isinf(total_cost) or total_cost < 0:
+        total_cost = 0.0
+
     return total_cost, grid_costs
 
 def apply_budget_constraint(grid_acres, total_cost, budget_limit):
@@ -1422,76 +1443,192 @@ def run_portfolio_optimization_wrapper(base_data_df, naive_allocation, optimizat
         return detailed_alloc_df, detailed_change_df, opt_metrics, final_weights
 
 # === GRID ALLOCATION OPTIMIZER (MEAN-VARIANCE) ===
-def optimize_grid_allocation(base_data_df, interval_weights, max_acres_per_grid, risk_aversion=1.0):
+def optimize_grid_allocation(base_data_df, interval_weights, initial_acres_per_grid,
+                            annual_budget, session, common_params, selected_grids, risk_aversion=1.0):
     """
-    Optimizes the acreage allocation across grids given a fixed interval strategy.
-    Objective: Maximize Mean Return - Risk_Aversion * Variance
+    Two-stage optimization with robust error handling:
+    Stage 1: Find the maximum total acres that fit within budget
+    Stage 2: Optimize distribution of those acres for best risk-adjusted returns
+
+    Args:
+        initial_acres_per_grid: Dict of {grid_id: acres} - STARTING point, not hard cap
+        annual_budget: Maximum annual premium cost
+
+    Returns:
+        (optimized_acres_dict, roi_df) or raises ValueError on failure
     """
     grids = list(base_data_df['grid'].unique())
     num_grids = len(grids)
-    
+
+    # Calculate ROI series for each grid
     grid_roi_series = {}
-    
     for grid_id in grids:
         grid_data = base_data_df[base_data_df['grid'] == grid_id]
         M_ind, M_prem, years, _ = prepare_vectorized_data(grid_data, {grid_id: 1.0})
-        
+
         rec_ind = M_ind @ interval_weights
         rec_prem = M_prem @ interval_weights
-        
+
         df_g = pd.DataFrame({'year': years, 'ind': rec_ind, 'prem': rec_prem})
         g_sums = df_g.groupby('year').sum()
-        
+
         with np.errstate(divide='ignore', invalid='ignore'):
             rois = (g_sums['ind'] - g_sums['prem']) / g_sums['prem']
             rois = np.nan_to_num(rois, nan=0.0)
-            
+
         grid_roi_series[grid_id] = pd.Series(rois, index=g_sums.index)
 
     roi_df = pd.DataFrame(grid_roi_series).fillna(0)
-    
     expected_returns = roi_df.mean()
     cov_matrix = roi_df.cov()
-    
-    def objective(acres_allocation):
-        max_acres_array = np.array([max_acres_per_grid.get(grid, 0) for grid in grids])
-        total_available_acres = np.sum(max_acres_array)
-        
-        weights = acres_allocation / total_available_acres
-        
-        port_ret = np.sum(expected_returns.values * weights)
-        port_var = np.dot(weights.T, np.dot(cov_matrix.values, weights))
-        utility = port_ret - (risk_aversion * port_var)
-        return -utility
-    
-    max_acres_array = np.array([max_acres_per_grid.get(grid, 0) for grid in grids])
-    total_available_acres = np.sum(max_acres_array)
-    
-    constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - total_available_acres})
-    
-    bounds = tuple((0.0, float(max_acres_array[i])) for i in range(num_grids))
-    
-    init_guess = np.full(num_grids, total_available_acres / num_grids)
-    init_guess = np.minimum(init_guess, max_acres_array)
-    
-    if np.sum(init_guess) < total_available_acres:
-        remaining = total_available_acres - np.sum(init_guess)
-        for i in range(num_grids):
-            if init_guess[i] < max_acres_array[i]:
-                room = max_acres_array[i] - init_guess[i]
-                give = min(room, remaining)
-                init_guess[i] += give
-                remaining -= give
-                if remaining <= 0:
-                    break
-    
-    result = minimize(objective, init_guess, method='SLSQP', bounds=bounds, constraints=constraints)
-    
-    if result.success:
-        optimal_acres = result.x
+
+    # Get initial acres array (use as reference, not hard cap)
+    initial_acres_array = np.array([initial_acres_per_grid.get(grid, 100.0) for grid in grids])
+
+    # Set reasonable upper bounds (10x initial acres or 10,000, whichever is larger)
+    max_acres_array = np.maximum(initial_acres_array * 10.0, 10000.0)
+
+    # STAGE 1: Find maximum total acres within budget using binary search
+    def calculate_cost_for_allocation(acres_allocation):
+        """Helper to calculate total cost for a given allocation"""
+        try:
+            acres_dict = dict(zip(grids, acres_allocation))
+            total_cost, _ = calculate_annual_premium_cost(
+                interval_weights, selected_grids, acres_dict,
+                session, common_params
+            )
+            # Validate cost
+            if np.isnan(total_cost) or np.isinf(total_cost) or total_cost < 0:
+                return 1e10  # Return very high cost if invalid
+            return total_cost
+        except Exception:
+            return 1e10  # Return very high cost on error
+
+    # Start with proportional allocation based on expected returns
+    # Give more acres to better-performing grids
+    if expected_returns.sum() > 0:
+        weights = expected_returns.values / expected_returns.sum()
+        weights = np.maximum(weights, 0.05)  # Ensure minimum 5% per grid
+        weights = weights / weights.sum()  # Re-normalize
     else:
-        optimal_acres = init_guess
-        
+        weights = np.ones(num_grids) / num_grids
+
+    # Binary search to find the scale factor that gets us closest to budget
+    low_scale = 0.1  # Start at 10% of max acres
+    high_scale = 100.0  # Allow up to 100x scaling
+
+    # First check if max acres is under budget
+    test_alloc = max_acres_array.copy()
+    max_cost = calculate_cost_for_allocation(test_alloc)
+
+    if max_cost <= annual_budget:
+        # If max acres is within budget, use all max acres!
+        optimal_acres = max_acres_array.copy()
+    else:
+        # Binary search for the right scale factor
+        best_scale = 1.0
+        best_alloc = initial_acres_array.copy()
+
+        for iteration in range(60):  # 60 iterations for precision
+            mid_scale = (low_scale + high_scale) / 2.0
+
+            # Scale initial allocation proportionally by returns-based weights
+            test_alloc = initial_acres_array * mid_scale * weights / weights.mean()
+            test_alloc = np.minimum(test_alloc, max_acres_array)  # Respect max per grid
+            test_alloc = np.maximum(test_alloc, 1.0)  # Ensure at least 1 acre per grid
+
+            test_cost = calculate_cost_for_allocation(test_alloc)
+
+            if test_cost < annual_budget * 0.98:  # Target 98% of budget
+                low_scale = mid_scale
+                best_scale = mid_scale
+                best_alloc = test_alloc.copy()
+            elif test_cost > annual_budget * 1.02:  # Over budget
+                high_scale = mid_scale
+            else:  # Within 2% of budget - good enough!
+                best_alloc = test_alloc.copy()
+                break
+
+        optimal_acres = best_alloc
+
+    # Validate Stage 1 result
+    if np.any(np.isnan(optimal_acres)) or np.any(np.isinf(optimal_acres)) or np.any(optimal_acres < 0):
+        # Fallback: equal distribution within budget
+        optimal_acres = np.ones(num_grids) * (annual_budget / (num_grids * 100.0))
+
+    # STAGE 2: Fine-tune distribution for better risk-adjusted returns
+    def objective_stage2(acres_allocation):
+        """Optimize for utility while staying near budget target"""
+        try:
+            total_acres_used = np.sum(acres_allocation)
+            if total_acres_used < 0.01:
+                return 1e10
+
+            weights_alloc = acres_allocation / total_acres_used
+            port_ret = np.sum(expected_returns.values * weights_alloc)
+            port_var = np.dot(weights_alloc.T, np.dot(cov_matrix.values, weights_alloc))
+            utility = port_ret - (risk_aversion * port_var)
+
+            if np.isnan(utility) or np.isinf(utility):
+                return 1e10
+
+            return -utility
+        except Exception:
+            return 1e10
+
+    def budget_constraint_stage2(acres_allocation):
+        """Must stay within budget"""
+        try:
+            total_cost = calculate_cost_for_allocation(acres_allocation)
+            return annual_budget - total_cost
+        except Exception:
+            return -1e10  # Violated constraint
+
+    def budget_target_constraint(acres_allocation):
+        """Encourage using at least 90% of budget (relaxed from 95%)"""
+        try:
+            total_cost = calculate_cost_for_allocation(acres_allocation)
+            return total_cost - (annual_budget * 0.90)
+        except Exception:
+            return -1e10  # Violated constraint
+
+    bounds = tuple((1.0, float(max_acres_array[i])) for i in range(num_grids))
+
+    constraints = [
+        {'type': 'ineq', 'fun': budget_constraint_stage2},  # Cost <= budget
+        {'type': 'ineq', 'fun': budget_target_constraint}   # Cost >= 90% budget
+    ]
+
+    # Try Stage 2 optimization with error handling
+    try:
+        result = minimize(
+            objective_stage2,
+            optimal_acres,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 150, 'ftol': 1e-6}
+        )
+
+        if result.success and result.x is not None:
+            # Validate result
+            if not (np.any(np.isnan(result.x)) or np.any(np.isinf(result.x)) or np.any(result.x < 0)):
+                final_acres = result.x
+                final_cost = calculate_cost_for_allocation(final_acres)
+
+                # If cost is valid and within budget, use Stage 2 result
+                if not np.isnan(final_cost) and 0 < final_cost <= annual_budget:
+                    optimal_acres = final_acres
+                # else: fall back to Stage 1
+        # else: fall back to Stage 1
+    except Exception as e:
+        # Stage 2 failed, use Stage 1 result
+        pass
+
+    # Final validation before returning
+    if np.any(np.isnan(optimal_acres)) or np.any(np.isinf(optimal_acres)) or np.any(optimal_acres < 0):
+        raise ValueError("Optimization produced invalid acres allocation. Check grid data (CBV, premium rates).")
+
     return dict(zip(grids, optimal_acres)), roi_df
 
 # =============================================================================
@@ -1514,7 +1651,7 @@ def create_naive_allocation_heatmap(coverage_df):
         annot=True,
         fmt='.0%',
         cmap='Greens',
-        cbar_kws={'label': 'Allocation %', 'format': '%.0f%%'},
+        cbar=False,
         linewidths=0.5,
         linecolor='gray',
         vmin=0,
@@ -1545,37 +1682,44 @@ def create_optimized_allocation_table(detailed_alloc_df, grid_acres=None, grid_c
     Returns a matplotlib figure.
     """
     display_df = detailed_alloc_df.copy()
-    
+
     cols_to_show = INTERVAL_ORDER_11 + ['Row Sum']
-    if 'Pattern' in display_df.columns:
-        cols_to_show.append('Pattern')
-    if budget_enabled and grid_acres is not None:
+    # Always show Acres and Premium columns if they exist in the dataframe for full transparency
+    if 'Acres' in display_df.columns:
         cols_to_show.append('Acres')
-    if budget_enabled and grid_costs is not None:
+    if 'Annual Premium ($)' in display_df.columns:
         cols_to_show.append('Annual Premium ($)')
-    
+
     cols_to_show = [c for c in cols_to_show if c in display_df.columns]
     plot_data = display_df[cols_to_show]
-    
+
+    # Create display labels for column headers (abbreviate long names)
+    col_display_labels = []
+    for col in cols_to_show:
+        if col == 'Annual Premium ($)':
+            col_display_labels.append('Annual\nPremium ($)')
+        else:
+            col_display_labels.append(col)
+
     n_cols = len(cols_to_show)
     n_rows = len(plot_data)
     fig_width = max(17, n_cols * 1.3)
     fig_height = max(4.5, n_rows * 0.75 + 1.5)
-    
+
     fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=100)
     ax.axis('tight')
     ax.axis('off')
-    
+
     cell_text = []
     cell_colors = []
-    
+
     for idx, row in plot_data.iterrows():
         row_text = []
         row_colors = []
-        
+
         for col in cols_to_show:
             val = row[col]
-            
+
             if col in INTERVAL_ORDER_11 or col == 'Row Sum':
                 text = f'{val:.0%}'
                 if col in INTERVAL_ORDER_11 and val > 0.001:
@@ -1596,20 +1740,20 @@ def create_optimized_allocation_table(detailed_alloc_df, grid_acres=None, grid_c
             else:
                 text = str(val)
                 row_colors.append('white')
-            
+
             row_text.append(text)
-        
+
         cell_text.append(row_text)
-        
+
         if 'OPTIMIZED AVERAGE' in idx or 'PORTFOLIO AVERAGE' in idx:
             cell_colors.append(['#BDBDBD'] * len(cols_to_show))
         else:
             cell_colors.append(row_colors)
-    
+
     table = ax.table(
         cellText=cell_text,
         rowLabels=plot_data.index,
-        colLabels=cols_to_show,
+        colLabels=col_display_labels,
         cellColours=cell_colors,
         cellLoc='center',
         rowLoc='left',
@@ -1639,37 +1783,63 @@ def create_optimized_allocation_table(detailed_alloc_df, grid_acres=None, grid_c
     plt.tight_layout(pad=2.0)
     return fig
 
-def create_allocation_changes_table(optimized_weights, naive_alloc_df, selected_grids, grid_acres_original=None, grid_acres_final=None, budget_enabled=False):
+def create_allocation_changes_table(optimized_alloc_df, naive_alloc_df, selected_grids, grid_acres_original=None, grid_acres_final=None, budget_enabled=False):
     """
     Creates a table showing allocation changes for each grid.
-    Compares each grid's INDIVIDUAL naive allocation to the OPTIMIZED allocation.
+    Compares each grid's INDIVIDUAL naive allocation to that SAME grid's INDIVIDUAL optimized allocation.
     Grids as rows, intervals as columns, showing percentage changes.
     Returns a matplotlib figure.
     """
     change_rows = []
-    
+
     for grid in selected_grids:
         row_dict = {'Grid': grid}
-        
+
+        # Get this grid's naive allocation
         if grid in naive_alloc_df.index:
             grid_naive = naive_alloc_df.loc[grid, INTERVAL_ORDER_11]
         else:
             grid_naive = naive_alloc_df.loc['AVERAGE', INTERVAL_ORDER_11]
-        
+
+        # Get this grid's optimized allocation (NOT the average!)
+        if grid in optimized_alloc_df.index:
+            grid_optimized = optimized_alloc_df.loc[grid, INTERVAL_ORDER_11]
+        else:
+            # Fallback to optimized average if grid not found
+            if 'OPTIMIZED AVERAGE' in optimized_alloc_df.index:
+                grid_optimized = optimized_alloc_df.loc['OPTIMIZED AVERAGE', INTERVAL_ORDER_11]
+            elif 'PORTFOLIO AVERAGE' in optimized_alloc_df.index:
+                grid_optimized = optimized_alloc_df.loc['PORTFOLIO AVERAGE', INTERVAL_ORDER_11]
+            else:
+                # Last resort: use naive as fallback
+                grid_optimized = grid_naive
+
         net_change = 0
-        for i, interval in enumerate(INTERVAL_ORDER_11):
-            change = optimized_weights[i] - grid_naive[interval]
+        for interval in INTERVAL_ORDER_11:
+            change = grid_optimized[interval] - grid_naive[interval]
             row_dict[interval] = change
             net_change += change
-        
+
         row_dict['Net Change'] = net_change
         change_rows.append(row_dict)
-    
+
+    # Add average shift row (comparing portfolio averages)
     avg_naive = naive_alloc_df.loc['AVERAGE', INTERVAL_ORDER_11]
+
+    # Handle different row names for average based on optimization mode
+    if 'OPTIMIZED AVERAGE' in optimized_alloc_df.index:
+        avg_optimized = optimized_alloc_df.loc['OPTIMIZED AVERAGE', INTERVAL_ORDER_11]
+    elif 'PORTFOLIO AVERAGE' in optimized_alloc_df.index:
+        avg_optimized = optimized_alloc_df.loc['PORTFOLIO AVERAGE', INTERVAL_ORDER_11]
+    else:
+        # Fallback: calculate average from grid data
+        grid_only_df = optimized_alloc_df[optimized_alloc_df.index.isin(selected_grids)]
+        avg_optimized = grid_only_df[INTERVAL_ORDER_11].mean()
+
     avg_row = {'Grid': 'AVERAGE SHIFT'}
     net_change = 0
-    for i, interval in enumerate(INTERVAL_ORDER_11):
-        change = optimized_weights[i] - avg_naive[interval]
+    for interval in INTERVAL_ORDER_11:
+        change = avg_optimized[interval] - avg_naive[interval]
         avg_row[interval] = change
         net_change += change
     avg_row['Net Change'] = net_change
@@ -1694,14 +1864,13 @@ def create_allocation_changes_table(optimized_weights, naive_alloc_df, selected_
         
         plot_data['Acres Change'] = acres_changes
         cols_to_show.append('Acres Change')
-    
+
     n_cols = len(cols_to_show)
     n_rows = len(plot_data)
     fig_width = max(17, n_cols * 1.3)
     fig_height = max(4.5, n_rows * 0.75 + 1.5)
-    
+
     fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=100)
-    ax.axis('tight')
     ax.axis('off')
     
     cell_text = []
@@ -1776,10 +1945,16 @@ def create_allocation_changes_table(optimized_weights, naive_alloc_df, selected_
         
         if i > 0 and plot_data.index[i-1] == 'AVERAGE SHIFT':
             cell.set_text_props(weight='bold', fontsize=11)
-        
+
         cell.set_edgecolor('#757575')
         cell.set_linewidth(0.8)
-    
+
+    # Remove any potential overlapping text elements
+    ax.set_xlabel('')
+    ax.set_ylabel('')
+    ax.set_title('')
+    fig.texts.clear()
+
     plt.tight_layout(pad=2.0)
     return fig
 
@@ -1792,6 +1967,47 @@ def render_location_tab(session, all_grid_ids, common_params):
     st.markdown("Discover the best performing grid and allocation combinations based on your market view.")
     
     st.markdown("### 📍 Grid Selection")
+
+    # King Ranch Grids Preset Button
+    king_ranch_grids = [
+        "9128 (Kleberg - TX)",
+        "9129 (Kleberg - TX)",
+        "9130 (Kleberg - TX)",
+        "9131 (Kleberg - TX)",
+        "8828 (Kleberg - TX)",
+        "8829 (Kleberg - TX)",
+        "8830 (Kleberg - TX)",
+        "8831 (Kleberg - TX)",
+        "8528 (Brooks - TX)",
+        "8228 (Brooks - TX)",
+        "8229 (Brooks - TX)",
+        "8529 (Brooks - TX)",
+        "8829 (Kenedy - TX)",
+        "7929 (Kenedy - TX)",
+        "8230 (Kenedy - TX)",
+        "7930 (Kenedy - TX)",
+        "8231 (Kenedy - TX)",
+        "7931 (Kenedy - TX)"
+    ]
+
+    # Filter to only include grids that exist in the available list
+    available_king_ranch_grids = [g for g in king_ranch_grids if g in all_grid_ids]
+
+    if st.button("King Ranch Grids Preset", key="king_ranch_preset_btn"):
+        if available_king_ranch_grids:
+            st.session_state['loc_grid_mode'] = 'Multiple Grids'
+            st.session_state['loc_multi_grid'] = available_king_ranch_grids
+
+            # Set preset values using intermediate keys (not widget-bound keys)
+            st.session_state['preset_coverage'] = 0.75  # 75% Coverage Level
+            st.session_state['preset_prod_factor'] = 1.35  # 135% Productivity Factor (decimal)
+
+            st.rerun()
+        else:
+            st.warning("No King Ranch grids found in the available grid list.")
+
+    st.caption("💡 **King Ranch Preset:** Automatically sets grids, **Coverage Level: 75%**, and **Productivity Factor: 135%**.")
+
     grid_mode = st.radio(
         "Analyze:",
         ['All Grids', 'Single Grid', 'Multiple Grids'],
@@ -1813,12 +2029,20 @@ def render_location_tab(session, all_grid_ids, common_params):
                 selected_grids = [selected_grid]
                 
         else:
-            selected_grids = st.multiselect(
-                "Select Grids",
-                all_grid_ids,
-                default=all_grid_ids[:2] if len(all_grid_ids) >= 2 else all_grid_ids,
-                key='loc_multi_grid'
-            )
+            # Only set default if there's no existing selection in session state
+            if 'loc_multi_grid' not in st.session_state:
+                selected_grids = st.multiselect(
+                    "Select Grids",
+                    all_grid_ids,
+                    default=all_grid_ids[:2] if len(all_grid_ids) >= 2 else all_grid_ids,
+                    key='loc_multi_grid'
+                )
+            else:
+                selected_grids = st.multiselect(
+                    "Select Grids",
+                    all_grid_ids,
+                    key='loc_multi_grid'
+                )
         st.divider()
         
         st.markdown("### 🎯 Your Market View")
@@ -1874,10 +2098,36 @@ def render_location_tab(session, all_grid_ids, common_params):
     
     if 'tab2_run' not in st.session_state:
         st.session_state.tab2_run = False
-    
+
     if submitted:
         st.session_state.tab2_run = True
-        
+
+        # Clear cached results if key parameters have changed
+        if 'tab2_results' in st.session_state and st.session_state.tab2_results:
+            cached_params = st.session_state.tab2_results
+            params_changed = False
+            change_reasons = []
+
+            if cached_params.get('interval_range') != interval_range:
+                params_changed = True
+                change_reasons.append(f"Interval range: {cached_params.get('interval_range')} → {interval_range}")
+
+            if cached_params.get('regime') != regime:
+                params_changed = True
+                change_reasons.append(f"Regime: {cached_params.get('regime')} → {regime}")
+
+            if cached_params.get('hist_context') != hist_context:
+                params_changed = True
+                change_reasons.append(f"Historical context changed")
+
+            if cached_params.get('trend') != trend:
+                params_changed = True
+                change_reasons.append(f"Trend changed")
+
+            if params_changed:
+                st.session_state.tab2_results = None
+                st.info(f"🔄 Parameters changed. Clearing cached results:\n" + "\n".join(f"• {r}" for r in change_reasons))
+
         if not selected_grids:
             st.error("⚠️ Please select at least one grid to analyze")
             return
@@ -1896,15 +2146,15 @@ def render_location_tab(session, all_grid_ids, common_params):
                 min_intervals, max_intervals = interval_range
                 for grid_id_display in selected_grids:
                     grid_id_numeric = extract_numeric_grid_id(grid_id_display)
-                    
+
                     df = load_all_indices(session, grid_id_numeric)
                     matching_years_info = filter_years_by_market_view(df, regime, hist_context, trend)
-                    
+
                     if not matching_years_info:
                         continue
-                    
+
                     matching_years = [y['year'] for y in matching_years_info]
-                    
+
                     static_data = {
                         'county_base_value': load_county_base_value(session, grid_id_display),
                         'premiums': load_premium_rates(session, grid_id_numeric, common_params['intended_use'],
@@ -1912,7 +2162,7 @@ def render_location_tab(session, all_grid_ids, common_params):
                         'subsidy': load_subsidy(session, common_params['plan_code'], coverage_level),
                         'acres': common_params['total_insured_acres']
                     }
-                    
+
                     interval_scores = {}
                     for interval in INTERVAL_ORDER_11:
                         interval_data = []
@@ -1921,23 +2171,24 @@ def render_location_tab(session, all_grid_ids, common_params):
                             row = year_data[year_data['INTERVAL_NAME'] == interval]
                             if not row.empty:
                                 interval_data.append(row['INDEX_VALUE'].iloc[0])
-                        
+
                         if interval_data:
                             avg_shortage = (100 - np.mean(interval_data))
                             interval_scores[interval] = avg_shortage
-                    
-                    sorted_intervals = sorted(interval_scores.items(), key=lambda x: x[1], reverse=True)
-                    top_intervals = [x[0] for x in sorted_intervals[:8]]
-                    
+
+                    # Use all 11 intervals for strategy generation to ensure valid non-adjacent patterns
+                    # Shortage scores are still calculated for performance evaluation
+                    all_intervals = INTERVAL_ORDER_11
+
                     candidates = []
                     for num_intervals in range(min_intervals, max_intervals + 1):
-                        for combo in combinations(top_intervals, num_intervals):
+                        for combo in combinations(all_intervals, num_intervals):
                             if has_adjacent_intervals(list(combo)):
                                 continue
-                            
+
                             allocations = generate_allocations(list(combo), num_intervals)
                             candidates.extend(allocations)
-                    
+
                     unique_candidates = []
                     seen = set()
                     for candidate in candidates:
@@ -1945,28 +2196,31 @@ def render_location_tab(session, all_grid_ids, common_params):
                         if key not in seen:
                             seen.add(key)
                             unique_candidates.append(candidate)
-                    
+
+                    # Track if we found any valid strategy for this grid
+                    grid_has_valid_strategy = False
+
                     for allocation in unique_candidates:
                         year_rois = []
                         year_indemnities = []
                         year_premiums = []
-                        
+
                         for year_info in matching_years_info:
                             year = year_info['year']
                             year_data = df[df['YEAR'] == year]
                             if len(year_data) >= 11:
                                 roi, indemnity, premium = calculate_yearly_roi(year_data, allocation, static_data, coverage_level)
-                                
+
                                 if roi is not None and not np.isinf(roi):
                                     year_rois.append(roi)
                                     year_indemnities.append(indemnity)
                                     year_premiums.append(premium)
-                                    
+
                                     net_return = indemnity - premium
                                     alloc_str_detail = ", ".join([f"{k}: {v*100:.0f}%" for k, v in sorted(allocation.items(),
                                                                                                           key=lambda x: x[1],
                                                                                                           reverse=True) if v > 0])
-                                    
+
                                     all_year_details.append({
                                         'Grid': grid_id_display,
                                         'Year': year,
@@ -1983,32 +2237,33 @@ def render_location_tab(session, all_grid_ids, common_params):
                                         'Producer_Premium': premium,
                                         'Net_Return': net_return
                                     })
-                        
+
                         if year_rois:
+                            grid_has_valid_strategy = True
                             avg_roi = np.mean(year_rois)
                             median_roi = np.median(year_rois)
                             std_dev = np.std(year_rois)
                             win_rate = np.sum(1 for r in year_rois if r > 0) / len(year_rois)
-                            
+
                             total_indemnity = np.sum(year_indemnities)
                             total_premium = np.sum(year_premiums)
                             if total_premium > 0:
                                 cumulative_roi = (total_indemnity - total_premium) / total_premium
                             else:
                                 cumulative_roi = 0.0
-                            
+
                             if std_dev > 0:
                                 risk_adjusted_return = avg_roi / std_dev
                             else:
                                 risk_adjusted_return = 0.0
-                            
+
                             alloc_str = ", ".join([f"{k}: {v*100:.0f}%" for k, v in sorted(allocation.items(),
                                                                                            key=lambda x: x[1],
                                                                                            reverse=True) if v > 0])
-                            
+
                             max_roi = np.max(year_rois)
                             min_roi = np.min(year_rois)
-                            
+
                             all_combinations.append({
                                 'Grid_ID': grid_id_display,
                                 'Allocation': alloc_str,
@@ -2024,6 +2279,24 @@ def render_location_tab(session, all_grid_ids, common_params):
                                 'Min_ROI': min_roi,
                                 'Best_Worst_Range': max_roi - min_roi
                             })
+
+                    # If grid has matching years but no valid strategy, add placeholder
+                    if not grid_has_valid_strategy and matching_years_info:
+                        all_combinations.append({
+                            'Grid_ID': grid_id_display,
+                            'Allocation': f'No valid {min_intervals}-{max_intervals} interval strategy',
+                            'Num_Intervals': 0,
+                            'Occurrences': len(matching_years_info),
+                            'Average_ROI': 0.0,
+                            'Cumulative_ROI': 0.0,
+                            'Median_ROI': 0.0,
+                            'Risk_Adjusted_Return': 0.0,
+                            'Win_Rate': 0.0,
+                            'Std_Dev': 0.0,
+                            'Max_ROI': 0.0,
+                            'Min_ROI': 0.0,
+                            'Best_Worst_Range': 0.0
+                        })
                 
                 if not all_combinations:
                     st.session_state.tab2_results = None
@@ -2040,7 +2313,8 @@ def render_location_tab(session, all_grid_ids, common_params):
                         'coverage_level': coverage_level,
                         'num_grids': len(selected_grids),
                         'grid_summary_with_selection': None,
-                        'sort_metric': sort_metric
+                        'sort_metric': sort_metric,
+                        'interval_range': interval_range
                     }
             
             if st.session_state.tab2_results is None:
@@ -2148,7 +2422,7 @@ def render_location_tab(session, all_grid_ids, common_params):
                             edited_df_to_save[col] = edited_df_to_save[col] / 100.0
                     st.session_state.tab2_results['grid_summary_with_selection'] = edited_df_to_save
                     st.success("Selections confirmed! You can now move to the 'Portfolio Backtest' tab.")
-            st.caption("💡 **Quality Score** combines Portfolio Return (40%) and Analog Year history (60%). Analog year scoring sharply penalizes years $<5$ and grants full points at $\ge 10$ years.")
+            st.caption("💡 **Quality Score** combines Portfolio Return (40%) and Analog Year history (60%). ROI reaches full points at 500%+. Analog year scoring sharply penalizes years $<5$ and grants full points at $\ge 10$ years.")
             
             st.divider()
             
@@ -2287,28 +2561,24 @@ def render_location_tab(session, all_grid_ids, common_params):
                     col3.metric("Avg ROI", f"{filtered_details_df['ROI'].mean():.1%}")
                     
                     st.dataframe(
-                        filtered_details_df.style.format({
-                            'Year': '{:.0f}', 'Phase_Intervals': '{:.0f}', 'Year_Avg_Hist_Z': '{:.2f}',
-                            'SOY_11P': '{:.2f}', 'EOY_5P': '{:.2f}', 'Trajectory_Delta': '{:.2f}',
-                            'Coverage': '{:.0%}', 'ROI': '{:.2%}', 'Indemnity': '${:,.0f}',
-                            'Producer_Premium': '${:,.0f}', 'Net_Return': '${:,.0f}'
-                        }),
-                        use_container_width=True, height=600,
+                        filtered_details_df,
+                        use_container_width=True,
+                        height=600,
                         column_config={
                             'Grid': st.column_config.TextColumn('Grid ID', width='medium'),
-                            'Year': st.column_config.NumberColumn('Year', width='small'),
+                            'Year': st.column_config.NumberColumn('Year', width='small', format="%.0f"),
                             'Allocation': st.column_config.TextColumn('Strategy', width='medium'),
                             'Phase': st.column_config.TextColumn('ENSO Phase', width='small'),
-                            'Phase_Intervals': st.column_config.NumberColumn('# Intervals', width='small', help='Number of 2-month intervals this phase was dominant (must be ≥4)'),
-                            'Year_Avg_Hist_Z': st.column_config.NumberColumn('Hist Z', width='small', help='Year Average Historical Z-Score'),
-                            'SOY_11P': st.column_config.NumberColumn('SOY 11P', width='small', help='Start-of-Year 11-period Z-Score (baseline)'),
-                            'EOY_5P': st.column_config.NumberColumn('EOY 5P', width='small', help='End-of-Year 5-period Z-Score (ending trend)'),
-                            'Trajectory_Delta': st.column_config.NumberColumn('Trajectory Δ', width='small', help='EOY 5P minus SOY 11P (intra-year evolution)'),
-                            'Coverage': st.column_config.NumberColumn('Coverage', width='small'),
-                            'ROI': st.column_config.NumberColumn('ROI %', width='small'),
-                            'Indemnity': st.column_config.NumberColumn('Indemnity Paid', width='medium'),
-                            'Producer_Premium': st.column_config.NumberColumn('Premium Cost', width='medium'),
-                            'Net_Return': st.column_config.NumberColumn('Net Profit/Loss', width='medium')
+                            'Phase_Intervals': st.column_config.NumberColumn('# Intervals', width='small', format="%.0f", help='Number of 2-month intervals this phase was dominant (must be ≥5)'),
+                            'Year_Avg_Hist_Z': st.column_config.NumberColumn('Hist Z', width='small', format="%.2f", help='Year Average Historical Z-Score'),
+                            'SOY_11P': st.column_config.NumberColumn('SOY 11P', width='small', format="%.2f", help='Start-of-Year 11-period Z-Score (baseline)'),
+                            'EOY_5P': st.column_config.NumberColumn('EOY 5P', width='small', format="%.2f", help='End-of-Year 5-period Z-Score (ending trend)'),
+                            'Trajectory_Delta': st.column_config.NumberColumn('Trajectory Δ', width='small', format="%.2f", help='EOY 5P minus SOY 11P (intra-year evolution)'),
+                            'Coverage': st.column_config.NumberColumn('Coverage', width='small', format="%.0f%%"),
+                            'ROI': st.column_config.NumberColumn('ROI %', width='small', format="%.2f%%"),
+                            'Indemnity': st.column_config.NumberColumn('Indemnity Paid', width='medium', format="$%.2f"),
+                            'Producer_Premium': st.column_config.NumberColumn('Premium Cost', width='medium', format="$%.2f"),
+                            'Net_Return': st.column_config.NumberColumn('Net Profit/Loss', width='medium', format="$%.2f")
                         }
                     )
                 else:
@@ -2470,7 +2740,7 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
         st.markdown("#### Scenario Definition")
         
         scenario_options = [
-            'All Years',
+            'All Years (except Current Year)',
             'Historically Dry Years (< -0.25 Z)',
             'Historically Normal Years (-0.25 to 0.25 Z)',
             'Historically Wet Years (> 0.25 Z)',
@@ -2509,20 +2779,21 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
             portfolio_avg_phase_by_year = all_year_df.groupby('year')['dominant_phase'].apply(lambda x: x.mode()[0] if not x.empty else 'Neutral')
             
             analog_years_list = []
-            if selected_scenario == 'All Years':
-                analog_years_list = portfolio_avg_z_by_year.index.tolist()
+            if selected_scenario == 'All Years (except Current Year)':
+                # Exclude current year (2025) and any future years - only use historical data
+                analog_years_list = [yr for yr in portfolio_avg_z_by_year.index.tolist() if yr < 2025]
             elif selected_scenario == 'Historically Dry Years (< -0.25 Z)':
-                analog_years_list = portfolio_avg_z_by_year[portfolio_avg_z_by_year < -0.25].index.tolist()
+                analog_years_list = [yr for yr in portfolio_avg_z_by_year[portfolio_avg_z_by_year < -0.25].index.tolist() if yr < 2025]
             elif selected_scenario == 'Historically Normal Years (-0.25 to 0.25 Z)':
-                analog_years_list = portfolio_avg_z_by_year[(portfolio_avg_z_by_year >= -0.25) & (portfolio_avg_z_by_year <= 0.25)].index.tolist()
+                analog_years_list = [yr for yr in portfolio_avg_z_by_year[(portfolio_avg_z_by_year >= -0.25) & (portfolio_avg_z_by_year <= 0.25)].index.tolist() if yr < 2025]
             elif selected_scenario == 'Historically Wet Years (> 0.25 Z)':
-                analog_years_list = portfolio_avg_z_by_year[portfolio_avg_z_by_year > 0.25].index.tolist()
+                analog_years_list = [yr for yr in portfolio_avg_z_by_year[portfolio_avg_z_by_year > 0.25].index.tolist() if yr < 2025]
             elif selected_scenario == 'ENSO Phase: La Niña':
-                analog_years_list = portfolio_avg_phase_by_year[portfolio_avg_phase_by_year == 'La Nina'].index.tolist()
+                analog_years_list = [yr for yr in portfolio_avg_phase_by_year[portfolio_avg_phase_by_year == 'La Nina'].index.tolist() if yr < 2025]
             elif selected_scenario == 'ENSO Phase: El Niño':
-                analog_years_list = portfolio_avg_phase_by_year[portfolio_avg_phase_by_year == 'El Nino'].index.tolist()
+                analog_years_list = [yr for yr in portfolio_avg_phase_by_year[portfolio_avg_phase_by_year == 'El Nino'].index.tolist() if yr < 2025]
             elif selected_scenario == 'ENSO Phase: Neutral':
-                analog_years_list = portfolio_avg_phase_by_year[portfolio_avg_phase_by_year == 'Neutral'].index.tolist()
+                analog_years_list = [yr for yr in portfolio_avg_phase_by_year[portfolio_avg_phase_by_year == 'Neutral'].index.tolist() if yr < 2025]
                 
             filtered_df = all_year_df[all_year_df['year'].isin(analog_years_list)].copy()
             
@@ -2619,11 +2890,11 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
             st.markdown("**Acreage Allocation Method:**")
             allocation_method = st.radio(
                 "How should acres be distributed to meet the budget?",
-                ["Equal Scaling", "Optimize Distribution"],
+                ["Optimize Distribution", "Equal Scaling"],
                 index=0,
                 key='allocation_method',
                 horizontal=True,
-                help="Equal Scaling: Reduce all grids proportionally. Optimize: Use mean-variance optimization to find ideal distribution (each grid stays within 0 to its specified max)."
+                help="Optimize Distribution: Use mean-variance optimization to find ideal distribution that maximizes returns within budget. Equal Scaling: Scale all grids proportionally to use full budget."
             )
         else:
             allocation_method = None
@@ -2632,11 +2903,11 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
         
         optimization_goal = st.radio(
             "Select Optimization Goal:",
-            ['Risk-Adjusted Return', 'Cumulative ROI'],
+            ['Cumulative ROI', 'Risk-Adjusted Return'],
             index=0,
             key='optimization_goal_select',
             horizontal=True,
-            help="Choose whether to maximize Sharpe Ratio (Risk-Adjusted Return) or maximize the simple total return (Cumulative ROI) over the scenario."
+            help="Choose whether to maximize the simple total return (Cumulative ROI) or maximize Sharpe Ratio (Risk-Adjusted Return) over the scenario."
         )
         
         st.markdown("**Diversification Constraints:**")
@@ -2680,6 +2951,28 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                    "- Optimizer decides which grids use which pattern")
         
         if st.button(f"✨ Optimize Portfolio (Max {optimization_goal})", key="run_optimization_btn", type="primary"):
+            # Clear cached optimization results if key parameters have changed
+            if 'optimization_results' in st.session_state and st.session_state.optimization_results:
+                cached_opt_params = st.session_state.optimization_results
+                params_changed = False
+                change_reasons = []
+
+                if cached_opt_params.get('interval_range') != interval_range_opt:
+                    params_changed = True
+                    change_reasons.append(f"Interval range: {cached_opt_params.get('interval_range')} → {interval_range_opt}")
+
+                if cached_opt_params.get('optimization_goal') != optimization_goal:
+                    params_changed = True
+                    change_reasons.append(f"Optimization goal: {cached_opt_params.get('optimization_goal')} → {optimization_goal}")
+
+                if cached_opt_params.get('full_coverage') != require_full_coverage:
+                    params_changed = True
+                    change_reasons.append(f"Full coverage: {cached_opt_params.get('full_coverage')} → {require_full_coverage}")
+
+                if params_changed:
+                    st.session_state.optimization_results = None
+                    st.info(f"🔄 Optimization parameters changed. Clearing cached results:\n" + "\n".join(f"• {r}" for r in change_reasons))
+
             if 'portfolio_base_data' in st.session_state and not st.session_state.portfolio_base_data.empty:
                 
                 naive_interval_weights = st.session_state.cached_naive_coverage_df.loc['AVERAGE', INTERVAL_ORDER_11]
@@ -2692,52 +2985,106 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                     )
                     
                     if detailed_alloc_df is not None:
-                        total_annual_cost, grid_cost_breakdown = calculate_annual_premium_cost(
-                            optimized_weights_raw, selected_grids, grid_acres, session, common_params
+                        # Calculate TRUE initial cost using NAIVE weights (before optimization)
+                        # This ensures "started with" matches the naive backtest cost
+                        naive_weights_array = naive_interval_weights[INTERVAL_ORDER_11].values
+                        initial_cost, initial_grid_cost_breakdown = calculate_annual_premium_cost(
+                            naive_weights_array, selected_grids, grid_acres, session, common_params
                         )
-                        
+
+                        # Validate initial cost
+                        if np.isnan(initial_cost) or initial_cost < 0:
+                            st.error("⚠️ Initial cost calculation failed. Check grid data (County Base Values, Premium Rates).")
+                            st.stop()
+
+                        total_annual_cost = initial_cost
+                        grid_cost_breakdown = initial_grid_cost_breakdown
                         final_grid_acres = grid_acres.copy()
                         budget_scale_factor = 1.0
                         budget_applied = False
-                        allocation_method_used = "None"
-                        
-                        if enable_budget and annual_budget is not None:
-                            if total_annual_cost > annual_budget:
+                        allocation_method_used = "None (Budget Disabled)"
+
+                        if enable_budget and annual_budget is not None and annual_budget > 0:
+                            if allocation_method == "Equal Scaling":
+                                # Equal Scaling: ALWAYS run to optimize budget usage
                                 budget_applied = True
-                                
-                                if allocation_method == "Equal Scaling":
+                                allocation_method_used = "Equal Scaling"
+
+                                if total_annual_cost > annual_budget:
+                                    # Scale DOWN if over budget
                                     final_grid_acres, budget_scale_factor = apply_budget_constraint(
                                         grid_acres, total_annual_cost, annual_budget
                                     )
-                                    allocation_method_used = "Equal Scaling"
-                                    
                                 else:
-                                    grid_opt_results, _ = optimize_grid_allocation(
-                                        st.session_state.portfolio_base_data,
-                                        optimized_weights_raw,
-                                        max_acres_per_grid=grid_acres,
-                                        risk_aversion=1.0
-                                    )
-                                    
-                                    final_grid_acres = grid_opt_results
-                                    
-                                    test_cost, _ = calculate_annual_premium_cost(
-                                        optimized_weights_raw, selected_grids, final_grid_acres, session, common_params
-                                    )
-                                    
-                                    if test_cost <= annual_budget:
-                                        budget_scale_factor = 1.0
-                                    else:
-                                        scale = annual_budget / test_cost
-                                        final_grid_acres = {grid: acres * scale for grid, acres in final_grid_acres.items()}
-                                        budget_scale_factor = scale
-                                    
-                                    allocation_method_used = "Optimized Distribution"
-                                
+                                    # Scale UP if under budget to use full budget
+                                    target_scale = annual_budget / total_annual_cost if total_annual_cost > 0 else 1.0
+                                    final_grid_acres = {grid: acres * target_scale for grid, acres in grid_acres.items()}
+                                    budget_scale_factor = target_scale
+
                                 total_annual_cost, grid_cost_breakdown = calculate_annual_premium_cost(
                                     optimized_weights_raw, selected_grids, final_grid_acres, session, common_params
                                 )
-                        
+
+                            else:
+                                # Optimized Distribution: ALWAYS run to maximize objective
+                                # Whether over or under budget, optimize allocation
+                                budget_applied = True
+                                allocation_method_used = "Optimized Distribution"
+
+                                try:
+                                    grid_opt_results, _ = optimize_grid_allocation(
+                                        st.session_state.portfolio_base_data,
+                                        optimized_weights_raw,
+                                        initial_acres_per_grid=grid_acres,
+                                        annual_budget=annual_budget,
+                                        session=session,
+                                        common_params=common_params,
+                                        selected_grids=selected_grids,
+                                        risk_aversion=1.0
+                                    )
+
+                                    # Validate optimization results
+                                    if not isinstance(grid_opt_results, dict):
+                                        raise TypeError(f"Expected dict, got {type(grid_opt_results)}")
+
+                                    for grid, acres in grid_opt_results.items():
+                                        if np.isnan(acres) or np.isinf(acres) or acres < 0:
+                                            raise ValueError(f"Invalid acres for {grid}: {acres}")
+
+                                    final_grid_acres = grid_opt_results
+                                    budget_scale_factor = 1.0
+
+                                    total_annual_cost, grid_cost_breakdown = calculate_annual_premium_cost(
+                                        optimized_weights_raw, selected_grids, final_grid_acres, session, common_params
+                                    )
+
+                                    # Validate cost calculation
+                                    if np.isnan(total_annual_cost) or total_annual_cost <= 0:
+                                        raise ValueError("Cost calculation failed. Check grid data (County Base Values, Premium Rates).")
+
+                                except Exception as e:
+                                    st.error(f"⚠️ Optimization failed: {str(e)}. Using fallback allocation.")
+                                    # Fallback to Equal Scaling if over budget, else keep original
+                                    if initial_cost > annual_budget:
+                                        final_grid_acres, budget_scale_factor = apply_budget_constraint(
+                                            grid_acres, initial_cost, annual_budget
+                                        )
+                                        allocation_method_used = "Equal Scaling (Fallback)"
+                                        total_annual_cost, grid_cost_breakdown = calculate_annual_premium_cost(
+                                            optimized_weights_raw, selected_grids, final_grid_acres, session, common_params
+                                        )
+
+                                        # Validate fallback cost
+                                        if np.isnan(total_annual_cost) or total_annual_cost < 0:
+                                            total_annual_cost = initial_cost
+                                            final_grid_acres = grid_acres.copy()
+                                            allocation_method_used = "None (Optimization Failed)"
+                                    else:
+                                        # Under budget but optimization failed - keep original
+                                        final_grid_acres = grid_acres.copy()
+                                        total_annual_cost = initial_cost
+                                        allocation_method_used = "None (Optimization Failed)"
+
                         opt_metrics['Scenario'] = display_scenario
                         st.session_state.optimization_results = {
                             'allocation_detailed': detailed_alloc_df,
@@ -2754,15 +3101,88 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                             'budget_enabled': enable_budget,
                             'allocation_method_used': allocation_method_used,
                             'full_coverage': require_full_coverage,
-                            'interval_range': interval_range_opt
+                            'interval_range': interval_range_opt,
+                            'initial_cost': initial_cost
                         }
-                        
-                        if budget_applied:
-                            if allocation_method_used == "Equal Scaling":
-                                st.warning(f"⚠️ Budget constraint applied: Acres scaled equally by {budget_scale_factor:.1%} to meet ${annual_budget:,.0f} budget. Total acres reduced from {sum(grid_acres.values()):,.0f} to {sum(final_grid_acres.values()):,.0f}.")
-                            else:
-                                st.warning(f"⚠️ Budget constraint applied: Acres optimally distributed (respecting max per grid) to meet ${annual_budget:,.0f} budget. Each grid allocated 0 to its specified maximum.")
-                            
+
+                        if budget_applied and allocation_method_used == "Optimized Distribution":
+                            # Calculate acres change with defensive formatting
+                            try:
+                                initial_total_acres = sum(grid_acres.values())
+                                final_total_acres = sum(final_grid_acres.values())
+                                acres_change = final_total_acres - initial_total_acres
+                                acres_change_pct = (acres_change / initial_total_acres * 100) if initial_total_acres > 0 else 0
+
+                                # Defensive formatting for costs
+                                if np.isnan(total_annual_cost) or np.isnan(annual_budget) or annual_budget <= 0:
+                                    st.error("⚠️ **Cost Calculation Error:** Unable to calculate budget utilization. Check grid data.")
+                                else:
+                                    budget_utilization = total_annual_cost / annual_budget
+
+                                    # Format the change message
+                                    if abs(acres_change) < 1:
+                                        change_msg = "maintained"
+                                    elif acres_change > 0:
+                                        change_msg = f"added {acres_change:,.0f} acres (+{acres_change_pct:.1f}%)"
+                                    else:
+                                        change_msg = f"removed {abs(acres_change):,.0f} acres ({acres_change_pct:.1f}%)"
+
+                                    if budget_utilization >= 0.95:
+                                        st.success(
+                                            f"✅ **Budget Fully Utilized:**\n\n"
+                                            f"Started with {initial_total_acres:,.0f} acres (${initial_cost:,.0f})\n\n"
+                                            f"Optimized to {final_total_acres:,.0f} acres ({change_msg})\n\n"
+                                            f"Using ${total_annual_cost:,.0f}"
+                                        )
+                                    elif budget_utilization >= 0.70:
+                                        st.info(
+                                            f"ℹ️ **Budget Optimization:**\n\n"
+                                            f"Started with {initial_total_acres:,.0f} acres\n\n"
+                                            f"Optimized to {final_total_acres:,.0f} acres ({change_msg})\n\n"
+                                            f"Using ${total_annual_cost:,.0f}"
+                                        )
+                                    else:
+                                        st.warning(
+                                            f"⚠️ **Low Budget Utilization:**\n\n"
+                                            f"Started with {initial_total_acres:,.0f} acres\n\n"
+                                            f"Optimized to {final_total_acres:,.0f} acres ({change_msg})\n\n"
+                                            f"Using ${total_annual_cost:,.0f}"
+                                        )
+                            except Exception as e:
+                                st.warning(f"⚠️ Budget optimization completed but summary calculation failed: {str(e)}")
+
+                        elif budget_applied and allocation_method_used == "Equal Scaling":
+                            try:
+                                initial_total_acres = sum(grid_acres.values())
+                                final_total_acres = sum(final_grid_acres.values())
+                                acres_change = final_total_acres - initial_total_acres
+
+                                if acres_change > 0:
+                                    st.success(
+                                        f"✅ **Equal Scaling Applied:**\n\n"
+                                        f"Acres scaled up by {budget_scale_factor:.1%} to use full ${annual_budget:,.0f} budget\n\n"
+                                        f"Total acres: {initial_total_acres:,.0f} → {final_total_acres:,.0f} (added {acres_change:,.0f} acres)"
+                                    )
+                                elif acres_change < 0:
+                                    st.warning(
+                                        f"⚠️ **Equal Scaling Applied:**\n\n"
+                                        f"Acres scaled down by {budget_scale_factor:.1%} to meet ${annual_budget:,.0f} budget\n\n"
+                                        f"Total acres: {initial_total_acres:,.0f} → {final_total_acres:,.0f} (removed {abs(acres_change):,.0f} acres)"
+                                    )
+                                else:
+                                    st.info(
+                                        f"ℹ️ **Equal Scaling:**\n\n"
+                                        f"Acres already optimal for ${annual_budget:,.0f} budget ({initial_total_acres:,.0f} acres)"
+                                    )
+                            except Exception:
+                                if budget_scale_factor > 1.0:
+                                    st.success(f"✅ **Equal Scaling Applied:** Acres scaled up by {budget_scale_factor:.1%} to use full budget.")
+                                else:
+                                    st.warning(f"⚠️ **Equal Scaling Applied:** Acres scaled down by {budget_scale_factor:.1%} to meet budget.")
+
+                        elif budget_applied and "Fallback" in allocation_method_used:
+                            st.info("ℹ️ Budget optimization encountered errors and used fallback proportional scaling.")
+
                         st.success(f"✅ Portfolio Optimization Complete!")
                     else:
                         st.error("Optimization failed to find a valid solution. Try a different scenario/grid combination.")
@@ -2811,7 +3231,7 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                 ax=ax,
                 annot_kws={"fontsize": 9}
             )
-            ax.set_title(f"ROI Correlation Matrix (Scenario: {display_scenario})", fontsize=12, fontweight='bold')
+            ax.set_title(f"ROI Correlation Matrix (Scenario: {display_scenario})", fontsize=10, fontweight='bold', pad=10)
             plt.yticks(rotation=0, fontsize=9)
             plt.xticks(rotation=45, ha='right', fontsize=9)
             plt.tight_layout()
@@ -2823,8 +3243,8 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
         st.markdown(f"### 7. Optimized Interval Allocation (Max {optimization_goal})")
         
         if full_coverage:
-            pattern_A_grids = [g for i, g in enumerate(selected_grids) if 'Pattern' in opt_detailed_df.columns and 'A' in str(opt_detailed_df.loc[g, 'Pattern'])]
-            pattern_B_grids = [g for i, g in enumerate(selected_grids) if 'Pattern' in opt_detailed_df.columns and 'B' in str(opt_detailed_df.loc[g, 'Pattern'])]
+            pattern_A_grids = [g for i, g in enumerate(selected_grids) if 'Pattern' in opt_detailed_df.columns and g in opt_detailed_df.index and 'A' in str(opt_detailed_df.loc[g, 'Pattern'])]
+            pattern_B_grids = [g for i, g in enumerate(selected_grids) if 'Pattern' in opt_detailed_df.columns and g in opt_detailed_df.index and 'B' in str(opt_detailed_df.loc[g, 'Pattern'])]
             st.caption(f"✅ **Staggered Full Calendar Coverage**:\n"
                       f"- **Pattern A** ({len(pattern_A_grids)} grids): Jan-Feb, Mar-Apr, May-Jun, Jul-Aug, Sep-Oct, Nov-Dec (6 intervals, each 10%-50%)\n"
                       f"- **Pattern B** ({len(pattern_B_grids)} grids): Feb-Mar, Apr-May, Jun-Jul, Aug-Sep, Oct-Nov (5 intervals, each 10%-50%)")
@@ -2848,29 +3268,43 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
         display_alloc_df = opt_detailed_df.copy()
         display_acres = opt_results.get('final_grid_acres', st.session_state.current_grid_acres)
 
+        # ALWAYS calculate costs for full transparency, regardless of budget settings
         if opt_results.get('budget_enabled', False):
-            acres_list = []
-            for idx in display_alloc_df.index:
-                if idx == 'OPTIMIZED AVERAGE':
-                    acres_list.append(sum(display_acres.values()))
-                else:
-                    acres_list.append(display_acres.get(idx, 0))
-            
-            display_alloc_df['Acres'] = acres_list
-            
-            cost_list = []
-            for idx in display_alloc_df.index:
-                if idx == 'OPTIMIZED AVERAGE':
-                    cost_list.append(opt_results['annual_cost'])
-                else:
-                    cost_list.append(opt_results['grid_costs'].get(idx, 0))
-            
-            display_alloc_df['Annual Premium ($)'] = cost_list
+            # Budget enabled: use pre-calculated values from optimization
+            annual_cost = opt_results['annual_cost']
+            grid_costs = opt_results['grid_costs']
+        else:
+            # Budget not enabled: calculate costs for transparency
+            annual_cost, grid_costs = calculate_annual_premium_cost(
+                optimized_weights_raw, selected_grids, display_acres, session, common_params
+            )
 
+        # ALWAYS add Acres and Annual Premium columns for transparency
+        acres_list = []
+        for idx in display_alloc_df.index:
+            # Handle both possible average row names
+            if idx in ['OPTIMIZED AVERAGE', 'PORTFOLIO AVERAGE']:
+                acres_list.append(sum(display_acres.values()))
+            else:
+                acres_list.append(display_acres.get(idx, 0))
+
+        display_alloc_df['Acres'] = acres_list
+
+        cost_list = []
+        for idx in display_alloc_df.index:
+            # Handle both possible average row names
+            if idx in ['OPTIMIZED AVERAGE', 'PORTFOLIO AVERAGE']:
+                cost_list.append(annual_cost)
+            else:
+                cost_list.append(grid_costs.get(idx, 0))
+
+        display_alloc_df['Annual Premium ($)'] = cost_list
+
+        # ALWAYS pass acres and costs to table for display
         alloc_fig = create_optimized_allocation_table(
             display_alloc_df,
-            grid_acres=display_acres if opt_results.get('budget_enabled', False) else None,
-            grid_costs=opt_results.get('grid_costs') if opt_results.get('budget_enabled', False) else None,
+            grid_acres=display_acres,
+            grid_costs=grid_costs,
             budget_enabled=opt_results.get('budget_enabled', False)
         )
         
@@ -2921,7 +3355,7 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
         naive_alloc_df = st.session_state.cached_naive_coverage_df
         
         changes_fig = create_allocation_changes_table(
-            optimized_weights=optimized_weights_raw,
+            optimized_alloc_df=opt_detailed_df,
             naive_alloc_df=naive_alloc_df,
             selected_grids=selected_grids,
             grid_acres_original=grid_acres_original if opt_results.get('budget_enabled', False) else None,
@@ -2940,22 +3374,36 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                 
                 # CSV download
                 naive_alloc_df = st.session_state.cached_naive_coverage_df
-                
+
                 # Recreate the changes dataframe for CSV
                 change_rows = []
                 for grid in selected_grids:
                     row_dict = {'Grid': grid}
+
+                    # Get this grid's naive allocation
                     if grid in naive_alloc_df.index:
                         grid_naive = naive_alloc_df.loc[grid, INTERVAL_ORDER_11]
                     else:
                         grid_naive = naive_alloc_df.loc['AVERAGE', INTERVAL_ORDER_11]
-                    
+
+                    # Get this grid's optimized allocation
+                    if grid in opt_detailed_df.index:
+                        grid_optimized = opt_detailed_df.loc[grid, INTERVAL_ORDER_11]
+                    else:
+                        # Fallback to optimized average if grid not found
+                        if 'OPTIMIZED AVERAGE' in opt_detailed_df.index:
+                            grid_optimized = opt_detailed_df.loc['OPTIMIZED AVERAGE', INTERVAL_ORDER_11]
+                        elif 'PORTFOLIO AVERAGE' in opt_detailed_df.index:
+                            grid_optimized = opt_detailed_df.loc['PORTFOLIO AVERAGE', INTERVAL_ORDER_11]
+                        else:
+                            grid_optimized = grid_naive
+
                     net_change = 0
-                    for i, interval in enumerate(INTERVAL_ORDER_11):
-                        change = optimized_weights_raw[i] - grid_naive[interval]
+                    for interval in INTERVAL_ORDER_11:
+                        change = grid_optimized[interval] - grid_naive[interval]
                         row_dict[interval] = change
                         net_change += change
-                    
+
                     row_dict['Net Change'] = net_change
                     if opt_results.get('budget_enabled', False):
                         row_dict['Acres Change'] = grid_acres_final.get(grid, 0) - grid_acres_original.get(grid, 0)
@@ -2979,7 +3427,7 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
         st.divider()
         
         st.markdown("### 9. Optimized vs. Naive Performance Comparison")
-        
+
         comparison_data = []
         metrics_to_compare = [
             'Cumulative_ROI', 'Risk_Adjusted_Return', 'Win_Rate', 'Std_Dev'
@@ -2990,42 +3438,37 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
         metric_formats = [
             '{:.1%}', '{:.2f}', '{:.1%}', '{:.1%}'
         ]
-        
+
+        # Calculate average annual premiums
+        naive_avg_premium = naive_metrics['Total_Premium'] / naive_metrics['Analog_Years'] if naive_metrics['Analog_Years'] > 0 else 0
+        optimized_annual_premium = opt_results.get('annual_cost', 0)
+        premium_change = optimized_annual_premium - naive_avg_premium
+        premium_change_pct = (premium_change / naive_avg_premium * 100) if naive_avg_premium > 0 else 0
+
+        # Add premium comparison row
+        comparison_data.append({
+            'Metric': 'Estimated Annual Premium',
+            'Naive Portfolio': f'${naive_avg_premium:,.0f}',
+            'Optimized Portfolio': f'${optimized_annual_premium:,.0f}',
+            'Change': f'${premium_change:+,.0f} ({premium_change_pct:+.1f}%)'
+        })
+
         for metric, label, fmt in zip(metrics_to_compare, metric_labels, metric_formats):
             naive_val = naive_metrics.get(metric, 0)
             opt_val = opt_metrics.get(metric, 0)
-            
-            if metric == 'Std_Dev':
-                # Lower std dev is better, so invert the difference
-                diff = naive_val - opt_val
-                comparison = f"{diff:+.1%}"
-            else:
-                diff = opt_val - naive_val
-                comparison = f"{diff:+.1%}" if metric in ['Cumulative_ROI', 'Win_Rate'] else f"{diff:+.2f}"
-            
+
+            diff = opt_val - naive_val
+            change = f"{diff:+.1%}" if metric in ['Cumulative_ROI', 'Win_Rate', 'Std_Dev'] else f"{diff:+.2f}"
+
             comparison_data.append({
                 'Metric': label,
                 'Naive Portfolio': fmt.format(naive_val),
                 'Optimized Portfolio': fmt.format(opt_val),
-                'Improvement': comparison
+                'Change': change
             })
-            
+
         comparison_df = pd.DataFrame(comparison_data).set_index('Metric')
-        
-        def color_diff(val):
-            if isinstance(val, str) and val.startswith('+'):
-                return 'background-color: #DFF0D8'
-            elif isinstance(val, str) and val.startswith('-'):
-                return 'background-color: #F2DEDE'
-            return ''
-            
-        st.dataframe(
-            comparison_df.style
-                .applymap(color_diff, subset=['Improvement'])
-                .set_properties(**{'font-weight': 'bold'}, subset=['Optimized Portfolio']),
-            use_container_width=True
-        )
-        st.caption("💡 **Improvement** shows how much better the Optimized Portfolio performed. For Standard Deviation, a **positive value means risk was reduced** (better).")
+        st.table(comparison_df)
         
         st.divider()
         
@@ -3056,21 +3499,40 @@ def main():
     if 'insurance_plan_code' not in st.session_state:
         st.session_state.insurance_plan_code = 13
     
+    # Determine coverage level index - use preset if available
+    coverage_options = [0.70, 0.75, 0.80, 0.85, 0.90]
+    if 'preset_coverage' in st.session_state:
+        try:
+            coverage_index = coverage_options.index(st.session_state['preset_coverage'])
+        except ValueError:
+            coverage_index = 2  # Default to 80%
+    else:
+        coverage_index = 2  # Default to 80%
+
     coverage_level = st.sidebar.selectbox(
         "Coverage Level",
-        [0.70, 0.75, 0.80, 0.85, 0.90],
-        index=2,
+        coverage_options,
+        index=coverage_index,
         format_func=lambda x: f"{x:.0%}",
         key='sidebar_coverage'
     )
-    
+
+    # Determine productivity factor index - use preset if available
     prod_options = list(range(60, 151))
     prod_options_formatted = [f"{x}%" for x in prod_options]
-    try:
-        current_prod_index = prod_options.index(int(st.session_state.productivity_factor * 100))
-    except ValueError:
-        current_prod_index = 40
-    
+
+    if 'preset_prod_factor' in st.session_state:
+        try:
+            preset_prod_pct = int(st.session_state['preset_prod_factor'] * 100)
+            current_prod_index = prod_options.index(preset_prod_pct)
+        except ValueError:
+            current_prod_index = 40  # Default to 100%
+    else:
+        try:
+            current_prod_index = prod_options.index(int(st.session_state.productivity_factor * 100))
+        except ValueError:
+            current_prod_index = 40
+
     selected_prod_str = st.sidebar.selectbox(
         "Productivity Factor",
         options=prod_options_formatted,
