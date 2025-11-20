@@ -3457,8 +3457,6 @@ def main():
     if 'preset_coverage' in st.session_state:
         try:
             coverage_index = coverage_options.index(st.session_state['preset_coverage'])
-            # Clear preset after using it once
-            del st.session_state['preset_coverage']
         except ValueError:
             coverage_index = 2  # Default to 80%
     else:
@@ -3480,8 +3478,6 @@ def main():
         try:
             preset_prod_pct = int(st.session_state['preset_prod_factor'] * 100)
             current_prod_index = prod_options.index(preset_prod_pct)
-            # Clear preset after using it once
-            del st.session_state['preset_prod_factor']
         except ValueError:
             current_prod_index = 40  # Default to 100%
     else:
