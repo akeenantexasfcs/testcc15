@@ -3265,31 +3265,43 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
         display_alloc_df = opt_detailed_df.copy()
         display_acres = opt_results.get('final_grid_acres', st.session_state.current_grid_acres)
 
+        # ALWAYS calculate costs for full transparency, regardless of budget settings
         if opt_results.get('budget_enabled', False):
-            acres_list = []
-            for idx in display_alloc_df.index:
-                # Handle both possible average row names
-                if idx in ['OPTIMIZED AVERAGE', 'PORTFOLIO AVERAGE']:
-                    acres_list.append(sum(display_acres.values()))
-                else:
-                    acres_list.append(display_acres.get(idx, 0))
+            # Budget enabled: use pre-calculated values from optimization
+            annual_cost = opt_results['annual_cost']
+            grid_costs = opt_results['grid_costs']
+        else:
+            # Budget not enabled: calculate costs for transparency
+            annual_cost, grid_costs = calculate_annual_premium_cost(
+                optimized_weights_raw, selected_grids, display_acres, session, common_params
+            )
 
-            display_alloc_df['Acres'] = acres_list
+        # ALWAYS add Acres and Annual Premium columns for transparency
+        acres_list = []
+        for idx in display_alloc_df.index:
+            # Handle both possible average row names
+            if idx in ['OPTIMIZED AVERAGE', 'PORTFOLIO AVERAGE']:
+                acres_list.append(sum(display_acres.values()))
+            else:
+                acres_list.append(display_acres.get(idx, 0))
 
-            cost_list = []
-            for idx in display_alloc_df.index:
-                # Handle both possible average row names
-                if idx in ['OPTIMIZED AVERAGE', 'PORTFOLIO AVERAGE']:
-                    cost_list.append(opt_results['annual_cost'])
-                else:
-                    cost_list.append(opt_results['grid_costs'].get(idx, 0))
+        display_alloc_df['Acres'] = acres_list
 
-            display_alloc_df['Annual Premium ($)'] = cost_list
+        cost_list = []
+        for idx in display_alloc_df.index:
+            # Handle both possible average row names
+            if idx in ['OPTIMIZED AVERAGE', 'PORTFOLIO AVERAGE']:
+                cost_list.append(annual_cost)
+            else:
+                cost_list.append(grid_costs.get(idx, 0))
 
+        display_alloc_df['Annual Premium ($)'] = cost_list
+
+        # ALWAYS pass acres and costs to table for display
         alloc_fig = create_optimized_allocation_table(
             display_alloc_df,
-            grid_acres=display_acres if opt_results.get('budget_enabled', False) else None,
-            grid_costs=opt_results.get('grid_costs') if opt_results.get('budget_enabled', False) else None,
+            grid_acres=display_acres,
+            grid_costs=grid_costs,
             budget_enabled=opt_results.get('budget_enabled', False)
         )
         
