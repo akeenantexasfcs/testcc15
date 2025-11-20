@@ -1682,13 +1682,14 @@ def create_optimized_allocation_table(detailed_alloc_df, grid_acres=None, grid_c
     Returns a matplotlib figure.
     """
     display_df = detailed_alloc_df.copy()
-    
+
     cols_to_show = INTERVAL_ORDER_11 + ['Row Sum']
-    if budget_enabled and grid_acres is not None:
+    # Always show Acres and Premium columns if they exist in the dataframe for full transparency
+    if 'Acres' in display_df.columns:
         cols_to_show.append('Acres')
-    if budget_enabled and grid_costs is not None:
+    if 'Annual Premium ($)' in display_df.columns:
         cols_to_show.append('Annual Premium ($)')
-    
+
     cols_to_show = [c for c in cols_to_show if c in display_df.columns]
     plot_data = display_df[cols_to_show]
 
@@ -2984,9 +2985,11 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                     )
                     
                     if detailed_alloc_df is not None:
-                        # Calculate initial cost (before any budget optimization)
+                        # Calculate TRUE initial cost using NAIVE weights (before optimization)
+                        # This ensures "started with" matches the naive backtest cost
+                        naive_weights_array = naive_interval_weights[INTERVAL_ORDER_11].values
                         initial_cost, initial_grid_cost_breakdown = calculate_annual_premium_cost(
-                            optimized_weights_raw, selected_grids, grid_acres, session, common_params
+                            naive_weights_array, selected_grids, grid_acres, session, common_params
                         )
 
                         # Validate initial cost
