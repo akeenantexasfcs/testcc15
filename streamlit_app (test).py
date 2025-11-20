@@ -2425,28 +2425,24 @@ def render_location_tab(session, all_grid_ids, common_params):
                     col3.metric("Avg ROI", f"{filtered_details_df['ROI'].mean():.1%}")
                     
                     st.dataframe(
-                        filtered_details_df.style.format({
-                            'Year': '{:.0f}', 'Phase_Intervals': '{:.0f}', 'Year_Avg_Hist_Z': '{:.2f}',
-                            'SOY_11P': '{:.2f}', 'EOY_5P': '{:.2f}', 'Trajectory_Delta': '{:.2f}',
-                            'Coverage': '{:.0%}', 'ROI': '{:.2%}', 'Indemnity': '${:,.0f}',
-                            'Producer_Premium': '${:,.0f}', 'Net_Return': '${:,.0f}'
-                        }),
-                        use_container_width=True, height=600,
+                        filtered_details_df,
+                        use_container_width=True,
+                        height=600,
                         column_config={
                             'Grid': st.column_config.TextColumn('Grid ID', width='medium'),
-                            'Year': st.column_config.NumberColumn('Year', width='small'),
+                            'Year': st.column_config.NumberColumn('Year', width='small', format="%.0f"),
                             'Allocation': st.column_config.TextColumn('Strategy', width='medium'),
                             'Phase': st.column_config.TextColumn('ENSO Phase', width='small'),
-                            'Phase_Intervals': st.column_config.NumberColumn('# Intervals', width='small', help='Number of 2-month intervals this phase was dominant (must be ≥4)'),
-                            'Year_Avg_Hist_Z': st.column_config.NumberColumn('Hist Z', width='small', help='Year Average Historical Z-Score'),
-                            'SOY_11P': st.column_config.NumberColumn('SOY 11P', width='small', help='Start-of-Year 11-period Z-Score (baseline)'),
-                            'EOY_5P': st.column_config.NumberColumn('EOY 5P', width='small', help='End-of-Year 5-period Z-Score (ending trend)'),
-                            'Trajectory_Delta': st.column_config.NumberColumn('Trajectory Δ', width='small', help='EOY 5P minus SOY 11P (intra-year evolution)'),
-                            'Coverage': st.column_config.NumberColumn('Coverage', width='small'),
-                            'ROI': st.column_config.NumberColumn('ROI %', width='small'),
-                            'Indemnity': st.column_config.NumberColumn('Indemnity Paid', width='medium'),
-                            'Producer_Premium': st.column_config.NumberColumn('Premium Cost', width='medium'),
-                            'Net_Return': st.column_config.NumberColumn('Net Profit/Loss', width='medium')
+                            'Phase_Intervals': st.column_config.NumberColumn('# Intervals', width='small', format="%.0f", help='Number of 2-month intervals this phase was dominant (must be ≥5)'),
+                            'Year_Avg_Hist_Z': st.column_config.NumberColumn('Hist Z', width='small', format="%.2f", help='Year Average Historical Z-Score'),
+                            'SOY_11P': st.column_config.NumberColumn('SOY 11P', width='small', format="%.2f", help='Start-of-Year 11-period Z-Score (baseline)'),
+                            'EOY_5P': st.column_config.NumberColumn('EOY 5P', width='small', format="%.2f", help='End-of-Year 5-period Z-Score (ending trend)'),
+                            'Trajectory_Delta': st.column_config.NumberColumn('Trajectory Δ', width='small', format="%.2f", help='EOY 5P minus SOY 11P (intra-year evolution)'),
+                            'Coverage': st.column_config.NumberColumn('Coverage', width='small', format="%.0%%"),
+                            'ROI': st.column_config.NumberColumn('ROI %', width='small', format="%.2%%"),
+                            'Indemnity': st.column_config.NumberColumn('Indemnity Paid', width='medium', format="$%,.0f"),
+                            'Producer_Premium': st.column_config.NumberColumn('Premium Cost', width='medium', format="$%,.0f"),
+                            'Net_Return': st.column_config.NumberColumn('Net Profit/Loss', width='medium', format="$%,.0f")
                         }
                     )
                 else:
