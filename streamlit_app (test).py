@@ -2564,6 +2564,8 @@ def render_location_tab(session, all_grid_ids, common_params):
                     # The ROI values are stored as decimals (e.g., 1.45 for 145%)
                     display_details_df = filtered_details_df.copy()
                     display_details_df['ROI'] = display_details_df['ROI'] * 100
+                    # Remove Coverage column (always shows 1%, adds no value)
+                    display_details_df = display_details_df.drop(columns=['Coverage'], errors='ignore')
 
                     st.dataframe(
                         display_details_df,
@@ -2579,7 +2581,6 @@ def render_location_tab(session, all_grid_ids, common_params):
                             'SOY_11P': st.column_config.NumberColumn('SOY 11P', width='small', format="%.2f", help='Start-of-Year 11-period Z-Score (baseline)'),
                             'EOY_5P': st.column_config.NumberColumn('EOY 5P', width='small', format="%.2f", help='End-of-Year 5-period Z-Score (ending trend)'),
                             'Trajectory_Delta': st.column_config.NumberColumn('Trajectory Δ', width='small', format="%.2f", help='EOY 5P minus SOY 11P (intra-year evolution)'),
-                            'Coverage': st.column_config.NumberColumn('Coverage', width='small', format="%.0f%%"),
                             'ROI': st.column_config.NumberColumn('ROI %', width='small', format="%.2f%%"),
                             'Indemnity': st.column_config.NumberColumn('Indemnity Paid', width='medium', format="$%.2f"),
                             'Producer_Premium': st.column_config.NumberColumn('Premium Cost', width='medium', format="$%.2f"),
