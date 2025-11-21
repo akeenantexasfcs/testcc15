@@ -2559,9 +2559,14 @@ def render_location_tab(session, all_grid_ids, common_params):
                     col1.metric("Total Matching Years", f"{filtered_details_df['Year'].nunique()}")
                     col2.metric("Grids Shown", f"{filtered_details_df['Grid'].nunique()}")
                     col3.metric("Avg ROI", f"{filtered_details_df['ROI'].mean():.1%}")
-                    
+
+                    # Create display copy with ROI converted to percentage (multiply by 100)
+                    # The ROI values are stored as decimals (e.g., 1.45 for 145%)
+                    display_details_df = filtered_details_df.copy()
+                    display_details_df['ROI'] = display_details_df['ROI'] * 100
+
                     st.dataframe(
-                        filtered_details_df,
+                        display_details_df,
                         use_container_width=True,
                         height=600,
                         column_config={
