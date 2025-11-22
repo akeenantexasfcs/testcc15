@@ -2546,6 +2546,15 @@ def render_location_tab(session, all_grid_ids, common_params):
                     }),
                     use_container_width=True, height=400
                 )
+                # CSV export button for View All Results
+                csv_all_results = filtered_full_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Export All Results to CSV",
+                    data=csv_all_results,
+                    file_name=f"all_results_{results['regime']}_{results['hist_context'].replace(' ', '_')}_{results['trend'].replace(' ', '_')}.csv",
+                    mime="text/csv",
+                    key="download_all_results_csv"
+                )
             
             with st.expander("🔍 Show Year-by-Year Calculation Details (PROOF)"):
                 st.markdown("### Year-by-Year Performance & Market View Validation")
@@ -2586,6 +2595,15 @@ def render_location_tab(session, all_grid_ids, common_params):
                             'Producer_Premium': st.column_config.NumberColumn('Premium Cost', width='medium', format="$%.2f"),
                             'Net_Return': st.column_config.NumberColumn('Net Profit/Loss', width='medium', format="$%.2f")
                         }
+                    )
+                    # CSV export button for Year-by-Year Calculation Details
+                    csv_year_details = display_details_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Export Year-by-Year Details to CSV",
+                        data=csv_year_details,
+                        file_name=f"year_by_year_details_{results['regime']}_{results['hist_context'].replace(' ', '_')}_{results['trend'].replace(' ', '_')}.csv",
+                        mime="text/csv",
+                        key="download_year_details_csv"
                     )
                 else:
                     st.info("No detailed results available. Run analysis first.")
