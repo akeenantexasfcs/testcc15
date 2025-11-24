@@ -2142,9 +2142,35 @@ def render_location_tab(session, all_grid_ids, common_params):
                 key='loc_sort_metric',
                 help="Choose the metric to sort the final results."
             )
-            
+
         st.divider()
-        
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            enable_year_cutoff = st.checkbox(
+                "Exclude older analog years",
+                value=False,
+                key='loc_enable_year_cutoff',
+                help="Filter out analog years before a specified cutoff year"
+            )
+
+        with col2:
+            if enable_year_cutoff:
+                cutoff_year = st.number_input(
+                    "Cutoff Year (exclude years before this)",
+                    min_value=1948,
+                    max_value=2024,
+                    value=1990,
+                    step=1,
+                    key='loc_cutoff_year',
+                    help="Analog years before this year will be excluded from analysis"
+                )
+            else:
+                cutoff_year = None
+
+        st.divider()
+
         submitted = st.form_submit_button("🚀 Discover Best Combinations", type="primary")
     
     if 'tab2_run' not in st.session_state:
@@ -2175,6 +2201,17 @@ def render_location_tab(session, all_grid_ids, common_params):
                 params_changed = True
                 change_reasons.append(f"Trend changed")
 
+            cached_cutoff = cached_params.get('cutoff_year')
+            current_cutoff = cutoff_year if enable_year_cutoff else None
+            if cached_cutoff != current_cutoff:
+                params_changed = True
+                if cached_cutoff is None and current_cutoff is not None:
+                    change_reasons.append(f"Year cutoff enabled: ≥ {current_cutoff}")
+                elif cached_cutoff is not None and current_cutoff is None:
+                    change_reasons.append(f"Year cutoff disabled")
+                else:
+                    change_reasons.append(f"Year cutoff: {cached_cutoff} → {current_cutoff}")
+
             if params_changed:
                 st.session_state.tab2_results = None
                 st.info(f"🔄 Parameters changed. Clearing cached results:\n" + "\n".join(f"• {r}" for r in change_reasons))
@@ -2200,6 +2237,10 @@ def render_location_tab(session, all_grid_ids, common_params):
 
                     df = load_all_indices(session, grid_id_numeric)
                     matching_years_info = filter_years_by_market_view(df, regime, hist_context, trend)
+
+                    # Apply year cutoff filter if enabled
+                    if enable_year_cutoff and cutoff_year is not None:
+                        matching_years_info = [y for y in matching_years_info if y['year'] >= cutoff_year]
 
                     if not matching_years_info:
                         continue
@@ -2365,7 +2406,8 @@ def render_location_tab(session, all_grid_ids, common_params):
                         'num_grids': len(selected_grids),
                         'grid_summary_with_selection': None,
                         'sort_metric': sort_metric,
-                        'interval_range': interval_range
+                        'interval_range': interval_range,
+                        'cutoff_year': cutoff_year if enable_year_cutoff else None
                     }
             
             if st.session_state.tab2_results is None:
@@ -2478,7 +2520,8 @@ def render_location_tab(session, all_grid_ids, common_params):
             st.divider()
             
             st.markdown(f"### 🏆 Top Grid + Allocation Combinations (Ranked by {SORT_METRIC_DISPLAY_MAP[sort_metric]})")
-            st.caption(f"**Market View:** {results['regime']} | {results['hist_context']} | {results['trend']}")
+            cutoff_text = f" | **Years ≥ {results['cutoff_year']}**" if results.get('cutoff_year') else ""
+            st.caption(f"**Market View:** {results['regime']} | {results['hist_context']} | {results['trend']}{cutoff_text}")
             st.caption(f"**Coverage:** {results['coverage_level']:.0%} | **Grids Analyzed:** {results['num_grids']}")
             
             col1, col2, col3 = st.columns(3)
@@ -2830,9 +2873,35 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
             index=0,
             key='portfolio_scenario_select_form'
         )
-        
+
         st.divider()
-        
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            enable_year_cutoff_portfolio = st.checkbox(
+                "Exclude older analog years",
+                value=False,
+                key='portfolio_enable_year_cutoff',
+                help="Filter out analog years before a specified cutoff year"
+            )
+
+        with col2:
+            if enable_year_cutoff_portfolio:
+                cutoff_year_portfolio = st.number_input(
+                    "Cutoff Year (exclude years before this)",
+                    min_value=1948,
+                    max_value=2024,
+                    value=1990,
+                    step=1,
+                    key='portfolio_cutoff_year',
+                    help="Analog years before this year will be excluded from backtest"
+                )
+            else:
+                cutoff_year_portfolio = None
+
+        st.divider()
+
         submitted_backtest = st.form_submit_button("📊 Run Naive Backtest", type="primary")
         
     if submitted_backtest:
@@ -2869,7 +2938,17 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                 analog_years_list = [yr for yr in portfolio_avg_phase_by_year[portfolio_avg_phase_by_year == 'El Nino'].index.tolist() if yr < 2025]
             elif selected_scenario == 'ENSO Phase: Neutral':
                 analog_years_list = [yr for yr in portfolio_avg_phase_by_year[portfolio_avg_phase_by_year == 'Neutral'].index.tolist() if yr < 2025]
-                
+
+            # Apply year cutoff filter if enabled
+            if enable_year_cutoff_portfolio and cutoff_year_portfolio is not None:
+                analog_years_list = [yr for yr in analog_years_list if yr >= cutoff_year_portfolio]
+
+            if not analog_years_list:
+                st.warning(f"No analog years found for '{selected_scenario}'" +
+                          (f" with cutoff year {cutoff_year_portfolio}" if enable_year_cutoff_portfolio and cutoff_year_portfolio else "") +
+                          ". Try a different scenario or earlier cutoff.")
+                return
+
             filtered_df = all_year_df[all_year_df['year'].isin(analog_years_list)].copy()
             
             st.session_state.portfolio_base_data = filtered_df
@@ -2888,13 +2967,16 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
             
             naive_metrics = calculate_portfolio_metrics(yearly_portfolio_performance_naive_df)
             naive_metrics['Scenario'] = selected_scenario
-            
+            naive_metrics['Cutoff_Year'] = cutoff_year_portfolio if enable_year_cutoff_portfolio else None
+
             st.session_state.naive_backtest_results = pd.DataFrame([naive_metrics])
             st.session_state.current_grid_acres = grid_acres
 
     if 'naive_backtest_results' in st.session_state and not st.session_state.naive_backtest_results.empty:
         display_scenario = st.session_state.naive_backtest_results.iloc[0]['Scenario']
-        st.markdown(f"### 5. Naive Backtest Result for: *{display_scenario}*")
+        display_cutoff = st.session_state.naive_backtest_results.iloc[0].get('Cutoff_Year')
+        cutoff_display = f" (Years ≥ {int(display_cutoff)})" if display_cutoff and not pd.isna(display_cutoff) else ""
+        st.markdown(f"### 5. Naive Backtest Result for: *{display_scenario}*{cutoff_display}")
         
         results_table_df = st.session_state.naive_backtest_results
         metrics = results_table_df.iloc[0]
