@@ -2546,6 +2546,15 @@ def render_location_tab(session, all_grid_ids, common_params):
                     }),
                     use_container_width=True, height=400
                 )
+                # CSV export button for View All Results
+                csv_all_results = filtered_full_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Export All Results to CSV",
+                    data=csv_all_results,
+                    file_name=f"all_results_{results['regime']}_{results['hist_context'].replace(' ', '_')}_{results['trend'].replace(' ', '_')}.csv",
+                    mime="text/csv",
+                    key="download_all_results_csv"
+                )
             
             with st.expander("🔍 Show Year-by-Year Calculation Details (PROOF)"):
                 st.markdown("### Year-by-Year Performance & Market View Validation")
@@ -2559,9 +2568,16 @@ def render_location_tab(session, all_grid_ids, common_params):
                     col1.metric("Total Matching Years", f"{filtered_details_df['Year'].nunique()}")
                     col2.metric("Grids Shown", f"{filtered_details_df['Grid'].nunique()}")
                     col3.metric("Avg ROI", f"{filtered_details_df['ROI'].mean():.1%}")
-                    
+
+                    # Create display copy with ROI converted to percentage (multiply by 100)
+                    # The ROI values are stored as decimals (e.g., 1.45 for 145%)
+                    display_details_df = filtered_details_df.copy()
+                    display_details_df['ROI'] = display_details_df['ROI'] * 100
+                    # Remove Coverage column (always shows 1%, adds no value)
+                    display_details_df = display_details_df.drop(columns=['Coverage'], errors='ignore')
+
                     st.dataframe(
-                        filtered_details_df,
+                        display_details_df,
                         use_container_width=True,
                         height=600,
                         column_config={
@@ -2574,12 +2590,20 @@ def render_location_tab(session, all_grid_ids, common_params):
                             'SOY_11P': st.column_config.NumberColumn('SOY 11P', width='small', format="%.2f", help='Start-of-Year 11-period Z-Score (baseline)'),
                             'EOY_5P': st.column_config.NumberColumn('EOY 5P', width='small', format="%.2f", help='End-of-Year 5-period Z-Score (ending trend)'),
                             'Trajectory_Delta': st.column_config.NumberColumn('Trajectory Δ', width='small', format="%.2f", help='EOY 5P minus SOY 11P (intra-year evolution)'),
-                            'Coverage': st.column_config.NumberColumn('Coverage', width='small', format="%.0f%%"),
                             'ROI': st.column_config.NumberColumn('ROI %', width='small', format="%.2f%%"),
                             'Indemnity': st.column_config.NumberColumn('Indemnity Paid', width='medium', format="$%.2f"),
                             'Producer_Premium': st.column_config.NumberColumn('Premium Cost', width='medium', format="$%.2f"),
                             'Net_Return': st.column_config.NumberColumn('Net Profit/Loss', width='medium', format="$%.2f")
                         }
+                    )
+                    # CSV export button for Year-by-Year Calculation Details
+                    csv_year_details = display_details_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Export Year-by-Year Details to CSV",
+                        data=csv_year_details,
+                        file_name=f"year_by_year_details_{results['regime']}_{results['hist_context'].replace(' ', '_')}_{results['trend'].replace(' ', '_')}.csv",
+                        mime="text/csv",
+                        key="download_year_details_csv"
                     )
                 else:
                     st.info("No detailed results available. Run analysis first.")
