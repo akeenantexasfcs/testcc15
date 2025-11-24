@@ -2252,6 +2252,7 @@ def render_location_tab(session, all_grid_ids, common_params):
                         'premiums': load_premium_rates(session, grid_id_numeric, common_params['intended_use'],
                                                        coverage_level, current_rate_year),
                         'subsidy': load_subsidy(session, common_params['plan_code'], coverage_level),
+                        'prod_factor': common_params['productivity_factor'],
                         'acres': common_params['total_insured_acres']
                     }
 
