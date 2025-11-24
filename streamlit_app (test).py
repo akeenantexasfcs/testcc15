@@ -9,6 +9,39 @@ import io
 from scipy.optimize import minimize
 import re
 import random
+from decimal import Decimal, ROUND_HALF_UP
+
+
+def round_half_up(value, decimals=2):
+    """
+    Round using 'round half up' to match PRF official tool.
+    Python's built-in round() uses banker's rounding (12.675 -> 12.67).
+    PRF Tool uses round half up (12.675 -> 12.68).
+    """
+    if value is None or (isinstance(value, float) and (np.isnan(value) or np.isinf(value))):
+        return 0.0
+    d = Decimal(str(value))
+    if decimals == 0:
+        quantize_to = Decimal('1')
+    else:
+        quantize_to = Decimal('0.' + '0' * (decimals - 1) + '1')
+    return float(d.quantize(quantize_to, rounding=ROUND_HALF_UP))
+
+
+def calculate_protection(county_base_value, coverage_level, productivity_factor, decimals=2):
+    """
+    Calculate dollar protection with proper precision using Decimal arithmetic.
+    Prevents issues like 16.90 * 0.75 * 1.0 = 12.674999999999999
+    """
+    cbv = Decimal(str(county_base_value))
+    cov = Decimal(str(coverage_level))
+    prod = Decimal(str(productivity_factor))
+    result = cbv * cov * prod
+    if decimals == 0:
+        quantize_to = Decimal('1')
+    else:
+        quantize_to = Decimal('0.' + '0' * (decimals - 1) + '1')
+    return float(result.quantize(quantize_to, rounding=ROUND_HALF_UP))
 
 # === GLOBAL CONSTANTS ===
 INTERVAL_ORDER_11 = ['Jan-Feb', 'Feb-Mar', 'Mar-Apr', 'Apr-May', 'May-Jun',
@@ -306,19 +339,25 @@ def calculate_yearly_roi(year_indices_df, allocation, static_data, coverage_leve
     """
     Calculate ROI for a single year given allocation.
     Note: Returns per-acre values if acres=1 in static_data.
+    Uses round_half_up for proper rounding to match PRF official tool.
     """
     subsidy = static_data.get('subsidy', 0.5)
     if subsidy > 1.0:
         subsidy = subsidy / 100.0
-        
+
     premiums = static_data.get('premiums', {})
-    
-    dollar_protection = static_data.get('county_base_value', 0) * coverage_level * static_data.get('prod_factor', 1)
-    total_protection = dollar_protection * static_data.get('acres', 1)
-    
+
+    # Use calculate_protection for proper decimal arithmetic
+    dollar_protection = calculate_protection(
+        static_data.get('county_base_value', 0),
+        coverage_level,
+        static_data.get('prod_factor', 1)
+    )
+    total_protection = round_half_up(dollar_protection * static_data.get('acres', 1), 0)
+
     total_indemnity = 0
     total_producer_premium = 0
-    
+
     for interval, pct in allocation.items():
         if pct <= 0:
             continue
@@ -328,9 +367,11 @@ def calculate_yearly_roi(year_indices_df, allocation, static_data, coverage_leve
         if premium_rate <= 0:
             continue
 
-        interval_protection = total_protection * pct
-        total_premium = interval_protection * premium_rate
-        producer_premium = total_premium - (total_premium * subsidy)
+        # Round each intermediate dollar value to whole dollars
+        interval_protection = round_half_up(total_protection * pct, 0)
+        total_premium = round_half_up(interval_protection * premium_rate, 0)
+        premium_subsidy = round_half_up(total_premium * subsidy, 0)
+        producer_premium = total_premium - premium_subsidy
 
         # Premium is always charged based on allocation, regardless of data availability
         total_producer_premium += max(0, producer_premium)
@@ -349,18 +390,18 @@ def calculate_yearly_roi(year_indices_df, allocation, static_data, coverage_leve
 
         trigger = coverage_level * 100
         shortfall_pct = max(0, (trigger - index_value) / trigger)
-        indemnity = shortfall_pct * interval_protection
+        indemnity = round_half_up(shortfall_pct * interval_protection, 0)
 
-        total_indemnity += indemnity 
-    
+        total_indemnity += indemnity
+
     if total_producer_premium == 0:
         if total_indemnity > 0:
-            roi = 0.0 
+            roi = 0.0
         else:
-            roi = 0.0 
+            roi = 0.0
     else:
         roi = (total_indemnity - total_producer_premium) / total_producer_premium
-        
+
     return roi, total_indemnity, total_producer_premium
 
 def create_download_button(fig, filename, key):
@@ -580,6 +621,7 @@ def fetch_and_process_all_grid_histories(_session, selected_grids, best_strategi
 def calculate_annual_premium_cost(allocation_weights, selected_grids, grid_acres, session, common_params):
     """
     Calculate total annual premium cost using 2025 rates with validation.
+    Uses round_half_up for proper rounding to match PRF official tool.
     Returns: (total_cost, grid_breakdown_dict)
     """
     current_rate_year = get_current_rate_year(session)
@@ -609,7 +651,8 @@ def calculate_annual_premium_cost(allocation_weights, selected_grids, grid_acres
         if acres <= 0 or np.isnan(acres) or np.isinf(acres):
             continue  # Skip grids with invalid acres
 
-        dollar_protection_per_acre = cbv * coverage_level * prod_factor
+        # Use calculate_protection for proper decimal arithmetic
+        dollar_protection_per_acre = calculate_protection(cbv, coverage_level, prod_factor)
 
         grid_cost = 0.0
         for i, interval in enumerate(INTERVAL_ORDER_11):
@@ -617,11 +660,15 @@ def calculate_annual_premium_cost(allocation_weights, selected_grids, grid_acres
             if interval_weight > 0.001:
                 premium_rate = premiums.get(interval, 0)
                 if premium_rate > 0 and not np.isnan(premium_rate):
-                    interval_premium = dollar_protection_per_acre * premium_rate * acres * (1 - subsidy)
+                    # Round each intermediate dollar value to whole dollars
+                    interval_protection = round_half_up(dollar_protection_per_acre * acres * interval_weight, 0)
+                    total_premium = round_half_up(interval_protection * premium_rate, 0)
+                    premium_subsidy = round_half_up(total_premium * subsidy, 0)
+                    interval_premium = total_premium - premium_subsidy
 
                     # Validate interval premium
                     if not np.isnan(interval_premium) and not np.isinf(interval_premium):
-                        grid_cost += interval_weight * interval_premium
+                        grid_cost += interval_premium
 
         # Validate grid cost before adding
         if not np.isnan(grid_cost) and not np.isinf(grid_cost) and grid_cost >= 0:
@@ -657,50 +704,54 @@ def apply_budget_constraint(grid_acres, total_cost, budget_limit):
 def prepare_vectorized_data(base_data_df, grid_acres):
     """
     Converts DataFrame into numpy arrays for fast vectorized optimization.
+    Uses round_half_up for proper rounding to match PRF official tool.
     Returns: (M_indemnity_base, M_premium_base, years_indices, num_grids, acres_vector)
     """
     records = []
     years = []
     acres_list = []
-    
+
     for _, row in base_data_df.iterrows():
         static = row['static_data']
         cbv = static['county_base_value']
         prems = static['premiums']
         sub = static.get('subsidy', 0.5)
         if sub > 1.0: sub /= 100.0
-        
+
         cov_level = row['coverage_level']
         prod_factor = static['prod_factor']
-        
-        base_prot = cbv * cov_level * prod_factor
+
+        # Use calculate_protection for proper decimal arithmetic
+        base_prot = calculate_protection(cbv, cov_level, prod_factor)
         trigger = cov_level * 100
-        
+
         row_indemnity = np.zeros(11)
         row_premium = np.zeros(11)
-        
+
         for i, interval in enumerate(INTERVAL_ORDER_11):
             idx_val = row['index_values'].get(interval)
             pr_rate = prems.get(interval, 0)
-            
+
             if idx_val is not None and not pd.isna(idx_val) and pr_rate > 0:
-                raw_prem = base_prot * pr_rate
-                prod_prem = raw_prem - (raw_prem * sub)
+                # Round each intermediate dollar value to whole dollars
+                raw_prem = round_half_up(base_prot * pr_rate, 0)
+                prem_subsidy = round_half_up(raw_prem * sub, 0)
+                prod_prem = raw_prem - prem_subsidy
                 row_premium[i] = max(0, prod_prem)
-                
+
                 shortfall = max(0, (trigger - idx_val) / trigger)
-                row_indemnity[i] = shortfall * base_prot
-                
+                row_indemnity[i] = round_half_up(shortfall * base_prot, 0)
+
         records.append((row_indemnity, row_premium))
         years.append(row['year'])
-        
+
         acres_list.append(grid_acres.get(row['grid'], 1.0))
-        
+
     M_ind = np.vstack([r[0] for r in records])
     M_prem = np.vstack([r[1] for r in records])
     years_arr = np.array(years)
     acres_arr = np.array(acres_list).reshape(-1, 1)
-    
+
     return M_ind, M_prem, years_arr, acres_arr
 
 def calculate_vectorized_roi(weights, M_ind, M_prem, years_arr, acres_arr, optimization_goal, min_allocation, interval_range, full_coverage=False):
