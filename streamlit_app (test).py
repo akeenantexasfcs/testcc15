@@ -273,55 +273,273 @@ def filter_years_by_market_view(df, regime, hist_context, trend):
     """
     hist_min, hist_max = HISTORICAL_CONTEXT_MAP[hist_context]
     trend_min, trend_max = TREND_MAP[trend]
-    
+
     matching_years = []
-    
+
     for year in df['YEAR'].unique():
         year_data = df[df['YEAR'] == year]
-        
+
         if len(year_data) < 11:
             continue
-        
+
         phase_counts = year_data['OPTICAL_MAPPING_CPC'].value_counts()
         dominant_phase = phase_counts.idxmax() if len(phase_counts) > 0 else None
         phase_intervals = phase_counts.max() if len(phase_counts) > 0 else 0
-        
+
         if dominant_phase != regime or phase_intervals < 5:
             continue
-        
+
         year_avg_hist_z = year_data['SEQUENTIAL_Z_SCORE_HISTORICAL_RECORD'].mean()
-        
+
         if pd.isna(year_avg_hist_z) or year_avg_hist_z < hist_min or year_avg_hist_z >= hist_max:
             continue
-        
+
         first_interval = year_data.iloc[0]
         last_interval = year_data.iloc[-1]
-        
+
         if 'SEQUENTIAL_Z_SCORE_5P' not in last_interval.index or 'SEQUENTIAL_Z_SCORE_11P' not in first_interval.index:
             continue
-            
+
         z_5p_end = last_interval['SEQUENTIAL_Z_SCORE_5P']
         z_11p_start = first_interval['SEQUENTIAL_Z_SCORE_11P']
-        
+
         if pd.isna(z_5p_end) or pd.isna(z_11p_start):
             continue
-        
+
         delta = z_5p_end - z_11p_start
-        
+
         if delta < trend_min or delta >= trend_max:
             continue
-        
+
         matching_years.append({
             'year': year,
             'dominant_phase': dominant_phase,
             'phase_intervals': phase_intervals,
             'year_avg_hist_z': year_avg_hist_z,
-            'year_start_11p': z_11p_start, 
-            'year_end_5p': z_5p_end, 
+            'year_start_11p': z_11p_start,
+            'year_end_5p': z_5p_end,
             'trajectory_delta': delta
         })
-    
+
     return matching_years
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def filter_years_by_market_view_cached(_session, grid_id_numeric, regime, hist_context, trend):
+    """
+    Cached version of filter_years_by_market_view.
+    Uses grid_id to load data internally for cacheability.
+    _session prefix excludes it from cache key.
+    """
+    df = load_all_indices(_session, grid_id_numeric)
+    return filter_years_by_market_view(df, regime, hist_context, trend)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def analyze_single_grid_cached(
+    grid_id_display,
+    grid_id_numeric,
+    matching_years_info_tuple,  # tuple of tuples for hashability
+    index_data_tuple,  # tuple of tuples: (year, interval, index_value)
+    static_data_tuple,  # tuple of (key, value) pairs
+    coverage_level,
+    min_intervals,
+    max_intervals
+):
+    """
+    Cached function to analyze all ROI combinations for a single grid.
+    Returns (combinations_list, year_details_list)
+    """
+    # Reconstruct matching_years_info from tuple
+    matching_years_info = [
+        {
+            'year': y[0],
+            'dominant_phase': y[1],
+            'phase_intervals': y[2],
+            'year_avg_hist_z': y[3],
+            'year_start_11p': y[4],
+            'year_end_5p': y[5],
+            'trajectory_delta': y[6]
+        }
+        for y in matching_years_info_tuple
+    ]
+
+    # Reconstruct static_data from tuple (premiums is a nested tuple)
+    static_data = {}
+    for key, value in static_data_tuple:
+        if key == 'premiums':
+            static_data[key] = dict(value)  # Convert premiums tuple back to dict
+        else:
+            static_data[key] = value
+
+    # Reconstruct index data lookup: {(year, interval): index_value}
+    index_lookup = {(row[0], row[1]): row[2] for row in index_data_tuple}
+
+    matching_years = [y['year'] for y in matching_years_info]
+
+    # Generate allocation candidates
+    all_intervals = INTERVAL_ORDER_11
+    candidates = []
+    for num_intervals in range(min_intervals, max_intervals + 1):
+        for combo in combinations(all_intervals, num_intervals):
+            if has_adjacent_intervals(list(combo)):
+                continue
+            allocations = generate_allocations(list(combo), num_intervals)
+            candidates.extend(allocations)
+
+    # Deduplicate candidates
+    unique_candidates = []
+    seen = set()
+    for candidate in candidates:
+        key = tuple(sorted(candidate.items()))
+        if key not in seen:
+            seen.add(key)
+            unique_candidates.append(candidate)
+
+    all_combinations = []
+    all_year_details = []
+
+    for allocation in unique_candidates:
+        year_rois = []
+        year_indemnities = []
+        year_premiums = []
+
+        for year_info in matching_years_info:
+            year = year_info['year']
+
+            # Build year_data dict for calculate_yearly_roi_from_index_lookup
+            year_indices = {}
+            for interval in INTERVAL_ORDER_11:
+                idx_val = index_lookup.get((year, interval))
+                if idx_val is not None:
+                    year_indices[interval] = idx_val
+
+            if len(year_indices) >= 11:
+                roi, indemnity, premium = calculate_yearly_roi_from_dict(
+                    year_indices, allocation, static_data, coverage_level
+                )
+
+                if roi is not None and not np.isinf(roi):
+                    year_rois.append(roi)
+                    year_indemnities.append(indemnity)
+                    year_premiums.append(premium)
+
+                    net_return = indemnity - premium
+                    alloc_str_detail = ", ".join([
+                        f"{k}: {v*100:.0f}%" for k, v in sorted(
+                            allocation.items(), key=lambda x: x[1], reverse=True
+                        ) if v > 0
+                    ])
+
+                    all_year_details.append({
+                        'Grid': grid_id_display,
+                        'Year': year,
+                        'Allocation': alloc_str_detail,
+                        'Phase': year_info['dominant_phase'],
+                        'Phase_Intervals': year_info['phase_intervals'],
+                        'Year_Avg_Hist_Z': year_info['year_avg_hist_z'],
+                        'SOY_11P': year_info['year_start_11p'],
+                        'EOY_5P': year_info['year_end_5p'],
+                        'Trajectory_Delta': year_info['trajectory_delta'],
+                        'Coverage': coverage_level,
+                        'ROI': roi,
+                        'Indemnity': indemnity,
+                        'Producer_Premium': premium,
+                        'Net_Return': net_return
+                    })
+
+        if year_rois:
+            avg_roi = np.mean(year_rois)
+            median_roi = np.median(year_rois)
+            std_dev = np.std(year_rois)
+            win_rate = np.sum(1 for r in year_rois if r > 0) / len(year_rois)
+
+            total_indemnity = np.sum(year_indemnities)
+            total_premium = np.sum(year_premiums)
+            cumulative_roi = (total_indemnity - total_premium) / total_premium if total_premium > 0 else 0.0
+            risk_adjusted_return = avg_roi / std_dev if std_dev > 0 else 0.0
+
+            alloc_str = ", ".join([
+                f"{k}: {v*100:.0f}%" for k, v in sorted(
+                    allocation.items(), key=lambda x: x[1], reverse=True
+                ) if v > 0
+            ])
+
+            max_roi = np.max(year_rois)
+            min_roi = np.min(year_rois)
+
+            all_combinations.append({
+                'Grid_ID': grid_id_display,
+                'Allocation': alloc_str,
+                'Num_Intervals': sum(1 for v in allocation.values() if v > 0),
+                'Occurrences': len(year_rois),
+                'Average_ROI': avg_roi,
+                'Cumulative_ROI': cumulative_roi,
+                'Median_ROI': median_roi,
+                'Risk_Adjusted_Return': risk_adjusted_return,
+                'Win_Rate': win_rate,
+                'Std_Dev': std_dev,
+                'Max_ROI': max_roi,
+                'Min_ROI': min_roi,
+                'Best_Worst_Range': max_roi - min_roi
+            })
+
+    return all_combinations, all_year_details
+
+
+def calculate_yearly_roi_from_dict(year_indices, allocation, static_data, coverage_level):
+    """
+    Calculate ROI for a single year given allocation, using a dict of index values.
+    This is a helper for the cached analysis function.
+    """
+    subsidy = static_data.get('subsidy', 0.5)
+    if subsidy > 1.0:
+        subsidy = subsidy / 100.0
+
+    premiums = static_data.get('premiums', {})
+
+    dollar_protection = calculate_protection(
+        static_data.get('county_base_value', 0),
+        coverage_level,
+        static_data.get('prod_factor', 1)
+    )
+    total_protection = round_half_up(dollar_protection * static_data.get('acres', 1), 0)
+
+    total_indemnity = 0
+    total_producer_premium = 0
+
+    for interval, pct in allocation.items():
+        if pct <= 0:
+            continue
+
+        premium_rate = premiums.get(interval, 0)
+
+        if premium_rate <= 0:
+            continue
+
+        interval_protection = round_half_up(total_protection * pct, 0)
+        total_premium = round_half_up(interval_protection * premium_rate, 0)
+        premium_subsidy = round_half_up(total_premium * subsidy, 0)
+        producer_premium = total_premium - premium_subsidy
+
+        total_producer_premium += max(0, producer_premium)
+
+        index_value = year_indices.get(interval)
+        if index_value is None or pd.isna(index_value):
+            continue
+
+        trigger = coverage_level * 100
+        shortfall_pct = max(0, (trigger - index_value) / trigger)
+        indemnity = round_half_up(shortfall_pct * interval_protection, 0)
+
+        total_indemnity += indemnity
+
+    if total_producer_premium == 0:
+        roi = 0.0
+    else:
+        roi = (total_indemnity - total_producer_premium) / total_producer_premium
+
+    return roi, total_indemnity, total_producer_premium
 
 def get_year_features(year_data_df):
     """Helper to get dominant phase and avg hist z for a single year's df"""
@@ -2222,195 +2440,137 @@ def render_location_tab(session, all_grid_ids, common_params):
         sort_metric = SORT_METRIC_DB_MAP[st.session_state.loc_sort_metric]
         
         st.info(f"🔍 Discovering best grid + allocation combinations for {len(selected_grids)} grid(s)...")
-        
+
         try:
-            with st.spinner(f"Analyzing {len(selected_grids)} grids under {regime} conditions..."):
-                current_rate_year = get_current_rate_year(session)
-                coverage_level = common_params['coverage_level']
-                
-                all_combinations = []
-                all_year_details = []
-                
-                min_intervals, max_intervals = interval_range
-                for grid_id_display in selected_grids:
-                    grid_id_numeric = extract_numeric_grid_id(grid_id_display)
+            current_rate_year = get_current_rate_year(session)
+            coverage_level = common_params['coverage_level']
 
-                    df = load_all_indices(session, grid_id_numeric)
-                    matching_years_info = filter_years_by_market_view(df, regime, hist_context, trend)
+            all_combinations = []
+            all_year_details = []
 
-                    # Apply year cutoff filter if enabled
-                    if enable_year_cutoff and cutoff_year is not None:
-                        matching_years_info = [y for y in matching_years_info if y['year'] >= cutoff_year]
+            min_intervals, max_intervals = interval_range
 
-                    if not matching_years_info:
-                        continue
+            # Progress bar for grid analysis
+            progress_bar = st.progress(0, text="Initializing analysis...")
+            total_grids = len(selected_grids)
 
-                    matching_years = [y['year'] for y in matching_years_info]
+            for grid_idx, grid_id_display in enumerate(selected_grids):
+                grid_id_numeric = extract_numeric_grid_id(grid_id_display)
 
-                    static_data = {
-                        'county_base_value': load_county_base_value(session, grid_id_display),
-                        'premiums': load_premium_rates(session, grid_id_numeric, common_params['intended_use'],
-                                                       coverage_level, current_rate_year),
-                        'subsidy': load_subsidy(session, common_params['plan_code'], coverage_level),
-                        'prod_factor': common_params['productivity_factor'],
-                        'acres': common_params['total_insured_acres']
-                    }
+                # Update progress
+                progress_pct = (grid_idx + 1) / total_grids
+                progress_bar.progress(progress_pct, text=f"Analyzing grid {grid_idx + 1}/{total_grids}: {grid_id_display}")
 
-                    interval_scores = {}
-                    for interval in INTERVAL_ORDER_11:
-                        interval_data = []
-                        for year in matching_years:
-                            year_data = df[df['YEAR'] == year]
-                            row = year_data[year_data['INTERVAL_NAME'] == interval]
-                            if not row.empty:
-                                interval_data.append(row['INDEX_VALUE'].iloc[0])
+                # Use cached filter function
+                matching_years_info = filter_years_by_market_view_cached(
+                    session, grid_id_numeric, regime, hist_context, trend
+                )
 
-                        if interval_data:
-                            avg_shortage = (100 - np.mean(interval_data))
-                            interval_scores[interval] = avg_shortage
+                # Apply year cutoff filter if enabled
+                if enable_year_cutoff and cutoff_year is not None:
+                    matching_years_info = [y for y in matching_years_info if y['year'] >= cutoff_year]
 
-                    # Use all 11 intervals for strategy generation to ensure valid non-adjacent patterns
-                    # Shortage scores are still calculated for performance evaluation
-                    all_intervals = INTERVAL_ORDER_11
+                if not matching_years_info:
+                    continue
 
-                    candidates = []
-                    for num_intervals in range(min_intervals, max_intervals + 1):
-                        for combo in combinations(all_intervals, num_intervals):
-                            if has_adjacent_intervals(list(combo)):
-                                continue
+                matching_years = [y['year'] for y in matching_years_info]
 
-                            allocations = generate_allocations(list(combo), num_intervals)
-                            candidates.extend(allocations)
+                # Load static data (these are already cached)
+                static_data = {
+                    'county_base_value': load_county_base_value(session, grid_id_display),
+                    'premiums': load_premium_rates(session, grid_id_numeric, common_params['intended_use'],
+                                                   coverage_level, current_rate_year),
+                    'subsidy': load_subsidy(session, common_params['plan_code'], coverage_level),
+                    'prod_factor': common_params['productivity_factor'],
+                    'acres': common_params['total_insured_acres']
+                }
 
-                    unique_candidates = []
-                    seen = set()
-                    for candidate in candidates:
-                        key = tuple(sorted(candidate.items()))
-                        if key not in seen:
-                            seen.add(key)
-                            unique_candidates.append(candidate)
+                # Load index data for matching years
+                df = load_all_indices(session, grid_id_numeric)
 
-                    # Track if we found any valid strategy for this grid
-                    grid_has_valid_strategy = False
+                # Convert data to hashable formats for caching
+                matching_years_info_tuple = tuple(
+                    (y['year'], y['dominant_phase'], y['phase_intervals'],
+                     y['year_avg_hist_z'], y['year_start_11p'], y['year_end_5p'],
+                     y['trajectory_delta'])
+                    for y in matching_years_info
+                )
 
-                    for allocation in unique_candidates:
-                        year_rois = []
-                        year_indemnities = []
-                        year_premiums = []
+                # Extract index data for matching years as tuple of tuples
+                index_data_list = []
+                for year in matching_years:
+                    year_data = df[df['YEAR'] == year]
+                    for _, row in year_data.iterrows():
+                        if not pd.isna(row['INDEX_VALUE']):
+                            index_data_list.append((year, row['INTERVAL_NAME'], row['INDEX_VALUE']))
+                index_data_tuple = tuple(index_data_list)
 
-                        for year_info in matching_years_info:
-                            year = year_info['year']
-                            year_data = df[df['YEAR'] == year]
-                            if len(year_data) >= 11:
-                                roi, indemnity, premium = calculate_yearly_roi(year_data, allocation, static_data, coverage_level)
+                # Convert static_data to hashable tuple (handle premiums dict specially)
+                premiums_tuple = tuple(sorted(static_data['premiums'].items()))
+                static_data_tuple = (
+                    ('county_base_value', static_data['county_base_value']),
+                    ('premiums', premiums_tuple),
+                    ('subsidy', static_data['subsidy']),
+                    ('prod_factor', static_data['prod_factor']),
+                    ('acres', static_data['acres'])
+                )
 
-                                if roi is not None and not np.isinf(roi):
-                                    year_rois.append(roi)
-                                    year_indemnities.append(indemnity)
-                                    year_premiums.append(premium)
+                # Use cached grid analysis function
+                grid_combinations, grid_year_details = analyze_single_grid_cached(
+                    grid_id_display,
+                    grid_id_numeric,
+                    matching_years_info_tuple,
+                    index_data_tuple,
+                    static_data_tuple,
+                    coverage_level,
+                    min_intervals,
+                    max_intervals
+                )
 
-                                    net_return = indemnity - premium
-                                    alloc_str_detail = ", ".join([f"{k}: {v*100:.0f}%" for k, v in sorted(allocation.items(),
-                                                                                                          key=lambda x: x[1],
-                                                                                                          reverse=True) if v > 0])
-
-                                    all_year_details.append({
-                                        'Grid': grid_id_display,
-                                        'Year': year,
-                                        'Allocation': alloc_str_detail,
-                                        'Phase': year_info['dominant_phase'],
-                                        'Phase_Intervals': year_info['phase_intervals'],
-                                        'Year_Avg_Hist_Z': year_info['year_avg_hist_z'],
-                                        'SOY_11P': year_info['year_start_11p'],
-                                        'EOY_5P': year_info['year_end_5p'],
-                                        'Trajectory_Delta': year_info['trajectory_delta'],
-                                        'Coverage': coverage_level,
-                                        'ROI': roi,
-                                        'Indemnity': indemnity,
-                                        'Producer_Premium': premium,
-                                        'Net_Return': net_return
-                                    })
-
-                        if year_rois:
-                            grid_has_valid_strategy = True
-                            avg_roi = np.mean(year_rois)
-                            median_roi = np.median(year_rois)
-                            std_dev = np.std(year_rois)
-                            win_rate = np.sum(1 for r in year_rois if r > 0) / len(year_rois)
-
-                            total_indemnity = np.sum(year_indemnities)
-                            total_premium = np.sum(year_premiums)
-                            if total_premium > 0:
-                                cumulative_roi = (total_indemnity - total_premium) / total_premium
-                            else:
-                                cumulative_roi = 0.0
-
-                            if std_dev > 0:
-                                risk_adjusted_return = avg_roi / std_dev
-                            else:
-                                risk_adjusted_return = 0.0
-
-                            alloc_str = ", ".join([f"{k}: {v*100:.0f}%" for k, v in sorted(allocation.items(),
-                                                                                           key=lambda x: x[1],
-                                                                                           reverse=True) if v > 0])
-
-                            max_roi = np.max(year_rois)
-                            min_roi = np.min(year_rois)
-
-                            all_combinations.append({
-                                'Grid_ID': grid_id_display,
-                                'Allocation': alloc_str,
-                                'Num_Intervals': sum(1 for v in allocation.values() if v > 0),
-                                'Occurrences': len(year_rois),
-                                'Average_ROI': avg_roi,
-                                'Cumulative_ROI': cumulative_roi,
-                                'Median_ROI': median_roi,
-                                'Risk_Adjusted_Return': risk_adjusted_return,
-                                'Win_Rate': win_rate,
-                                'Std_Dev': std_dev,
-                                'Max_ROI': max_roi,
-                                'Min_ROI': min_roi,
-                                'Best_Worst_Range': max_roi - min_roi
-                            })
-
+                if grid_combinations:
+                    all_combinations.extend(grid_combinations)
+                    all_year_details.extend(grid_year_details)
+                elif matching_years_info:
                     # If grid has matching years but no valid strategy, add placeholder
-                    if not grid_has_valid_strategy and matching_years_info:
-                        all_combinations.append({
-                            'Grid_ID': grid_id_display,
-                            'Allocation': f'No valid {min_intervals}-{max_intervals} interval strategy',
-                            'Num_Intervals': 0,
-                            'Occurrences': len(matching_years_info),
-                            'Average_ROI': 0.0,
-                            'Cumulative_ROI': 0.0,
-                            'Median_ROI': 0.0,
-                            'Risk_Adjusted_Return': 0.0,
-                            'Win_Rate': 0.0,
-                            'Std_Dev': 0.0,
-                            'Max_ROI': 0.0,
-                            'Min_ROI': 0.0,
-                            'Best_Worst_Range': 0.0
-                        })
-                
-                if not all_combinations:
-                    st.session_state.tab2_results = None
-                else:
-                    results_df = pd.DataFrame(all_combinations).sort_values(sort_metric, ascending=False)
-                    details_df = pd.DataFrame(all_year_details)
-                    
-                    st.session_state.tab2_results = {
-                        'df': results_df,
-                        'details': details_df,
-                        'regime': regime,
-                        'hist_context': hist_context,
-                        'trend': trend,
-                        'coverage_level': coverage_level,
-                        'num_grids': len(selected_grids),
-                        'grid_summary_with_selection': None,
-                        'sort_metric': sort_metric,
-                        'interval_range': interval_range,
-                        'cutoff_year': cutoff_year if enable_year_cutoff else None
-                    }
-            
+                    all_combinations.append({
+                        'Grid_ID': grid_id_display,
+                        'Allocation': f'No valid {min_intervals}-{max_intervals} interval strategy',
+                        'Num_Intervals': 0,
+                        'Occurrences': len(matching_years_info),
+                        'Average_ROI': 0.0,
+                        'Cumulative_ROI': 0.0,
+                        'Median_ROI': 0.0,
+                        'Risk_Adjusted_Return': 0.0,
+                        'Win_Rate': 0.0,
+                        'Std_Dev': 0.0,
+                        'Max_ROI': 0.0,
+                        'Min_ROI': 0.0,
+                        'Best_Worst_Range': 0.0
+                    })
+
+            # Clear progress bar
+            progress_bar.empty()
+
+            if not all_combinations:
+                st.session_state.tab2_results = None
+            else:
+                results_df = pd.DataFrame(all_combinations).sort_values(sort_metric, ascending=False)
+                details_df = pd.DataFrame(all_year_details)
+
+                st.session_state.tab2_results = {
+                    'df': results_df,
+                    'details': details_df,
+                    'regime': regime,
+                    'hist_context': hist_context,
+                    'trend': trend,
+                    'coverage_level': coverage_level,
+                    'num_grids': len(selected_grids),
+                    'grid_summary_with_selection': None,
+                    'sort_metric': sort_metric,
+                    'interval_range': interval_range,
+                    'cutoff_year': cutoff_year if enable_year_cutoff else None
+                }
+
             if st.session_state.tab2_results is None:
                 st.warning("No valid strategies found for any of the selected grids. Try different conditions.")
         except Exception as e:
