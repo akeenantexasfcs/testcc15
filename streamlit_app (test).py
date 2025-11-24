@@ -2686,9 +2686,9 @@ def render_location_tab(session, all_grid_ids, common_params):
                             'EOY_5P': st.column_config.NumberColumn('EOY 5P', width='small', format="%.2f", help='End-of-Year 5-period Z-Score (ending trend)'),
                             'Trajectory_Delta': st.column_config.NumberColumn('Trajectory Δ', width='small', format="%.2f", help='EOY 5P minus SOY 11P (intra-year evolution)'),
                             'ROI': st.column_config.NumberColumn('ROI %', width='small', format="%.2f%%"),
-                            'Indemnity': st.column_config.NumberColumn('Indemnity Paid', width='medium', format="$%.2f"),
-                            'Producer_Premium': st.column_config.NumberColumn('Premium Cost', width='medium', format="$%.2f"),
-                            'Net_Return': st.column_config.NumberColumn('Net Profit/Loss', width='medium', format="$%.2f")
+                            'Indemnity': st.column_config.NumberColumn('Indemnity Paid', width='medium', format="$%.0f"),
+                            'Producer_Premium': st.column_config.NumberColumn('Premium Cost', width='medium', format="$%.0f"),
+                            'Net_Return': st.column_config.NumberColumn('Net Profit/Loss', width='medium', format="$%.0f")
                         }
                     )
                     # CSV export button for Year-by-Year Calculation Details
