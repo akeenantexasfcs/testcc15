@@ -760,76 +760,83 @@ def calculate_naive_allocation(selected_grids_tuple, best_strategies_df):
 
 
 @st.cache_data(ttl=3600)
-def fetch_and_process_all_grid_histories(_session, selected_grids, best_strategies, common_params):
+def fetch_and_process_all_grid_histories(_session, selected_grids, best_strategies, common_params, grid_acres_tuple):
     """
     Fetches full history for *all* selected grids.
-    Returns per-acre (normalized) values because static_data['acres'] = 1.
+    Uses actual acres from grid_acres to ensure proper precision before rounding.
+    grid_acres_tuple: tuple of (grid_id, acres) pairs for cache hashability
     """
+    # Convert tuple back to dict
+    grid_acres = dict(grid_acres_tuple)
+
     all_year_data = []
-    
+
     filtered_strategies = best_strategies[best_strategies['Grid_ID'].isin(selected_grids)].copy()
-    
+
     naive_alloc_df = calculate_naive_allocation(tuple(selected_grids), best_strategies)
     if 'AVERAGE' not in naive_alloc_df.index:
         return pd.DataFrame()
-    
+
     avg_interval_weights = naive_alloc_df.loc['AVERAGE', INTERVAL_ORDER_11].to_dict()
-    
+
     for grid in selected_grids:
         grid_numeric = extract_numeric_grid_id(grid)
         if grid_numeric is None:
             continue
-            
+
         df = load_all_indices(_session, grid_numeric)
         if df.empty:
             continue
-        
+
         current_rate_year = get_current_rate_year(_session)
         coverage_level = common_params['coverage_level']
-        
+
+        # Use actual acres from grid_acres to ensure proper precision before rounding
+        actual_acres = grid_acres.get(grid, 1.0)
+
         static_data = {
             'county_base_value': load_county_base_value(_session, grid),
             'premiums': load_premium_rates(_session, grid_numeric, common_params['intended_use'],
                                            coverage_level, current_rate_year),
             'subsidy': load_subsidy(_session, common_params['plan_code'], coverage_level),
             'prod_factor': common_params['productivity_factor'],
-            'acres': 1
+            'acres': actual_acres
         }
-        
+
         for year in df['YEAR'].unique():
             year_data = df[df['YEAR'] == year]
             if len(year_data) < 11:
                 continue
-            
+
             roi, indemnity, premium = calculate_yearly_roi(year_data, avg_interval_weights, static_data, coverage_level)
-            
+
             if roi is None or pd.isna(roi) or np.isinf(roi):
                 continue
-                
+
             features = get_year_features(year_data)
             if pd.isna(features['avg_hist_z']):
                 continue
-            
-            index_values = {interval: float(year_data[year_data['INTERVAL_NAME'] == interval]['INDEX_VALUE'].iloc[0]) 
+
+            index_values = {interval: float(year_data[year_data['INTERVAL_NAME'] == interval]['INDEX_VALUE'].iloc[0])
                             for interval in INTERVAL_ORDER_11 if not year_data[year_data['INTERVAL_NAME'] == interval].empty}
-            
+
             all_year_data.append({
                 'grid': grid,
                 'year': year,
-                'roi': roi, 
+                'roi': roi,
                 'indemnity': indemnity,
                 'premium': premium,
-                'index_values': index_values, 
-                'static_data': static_data, 
+                'index_values': index_values,
+                'static_data': static_data,
                 'coverage_level': coverage_level,
                 'dominant_phase': features['dominant_phase'],
                 'avg_hist_z': features['avg_hist_z']
             })
-            
+
     if not all_year_data:
         return pd.DataFrame()
     all_year_df = pd.DataFrame(all_year_data)
-    
+
     return all_year_df
 
 # =============================================================================
@@ -923,6 +930,7 @@ def prepare_vectorized_data(base_data_df, grid_acres):
     """
     Converts DataFrame into numpy arrays for fast vectorized optimization.
     Uses round_half_up for proper rounding to match PRF official tool.
+    Calculates with actual acres BEFORE rounding to preserve precision.
     Returns: (M_indemnity_base, M_premium_base, years_indices, num_grids, acres_vector)
     """
     records = []
@@ -939,8 +947,13 @@ def prepare_vectorized_data(base_data_df, grid_acres):
         cov_level = row['coverage_level']
         prod_factor = static['prod_factor']
 
-        # Use calculate_protection for proper decimal arithmetic
-        base_prot = calculate_protection(cbv, cov_level, prod_factor)
+        # Get actual acres for this grid - use from static_data if available, else from grid_acres
+        actual_acres = static.get('acres', grid_acres.get(row['grid'], 1.0))
+
+        # Use calculate_protection for proper decimal arithmetic (per-acre)
+        dollar_prot_per_acre = calculate_protection(cbv, cov_level, prod_factor)
+        # Calculate total protection with actual acres, then round
+        total_prot = round_half_up(dollar_prot_per_acre * actual_acres, 0)
         trigger = cov_level * 100
 
         row_indemnity = np.zeros(11)
@@ -951,19 +964,19 @@ def prepare_vectorized_data(base_data_df, grid_acres):
             pr_rate = prems.get(interval, 0)
 
             if idx_val is not None and not pd.isna(idx_val) and pr_rate > 0:
-                # Round each intermediate dollar value to whole dollars
-                raw_prem = round_half_up(base_prot * pr_rate, 0)
+                # Calculate with total protection (includes acres), then round
+                # This matches the PRF tool calculation order
+                raw_prem = round_half_up(total_prot * pr_rate, 0)
                 prem_subsidy = round_half_up(raw_prem * sub, 0)
                 prod_prem = raw_prem - prem_subsidy
                 row_premium[i] = max(0, prod_prem)
 
                 shortfall = max(0, (trigger - idx_val) / trigger)
-                row_indemnity[i] = round_half_up(shortfall * base_prot, 0)
+                row_indemnity[i] = round_half_up(shortfall * total_prot, 0)
 
         records.append((row_indemnity, row_premium))
         years.append(row['year'])
-
-        acres_list.append(grid_acres.get(row['grid'], 1.0))
+        acres_list.append(actual_acres)
 
     M_ind = np.vstack([r[0] for r in records])
     M_prem = np.vstack([r[1] for r in records])
@@ -1013,12 +1026,10 @@ def calculate_vectorized_roi(weights, M_ind, M_prem, years_arr, acres_arr, optim
     if abs(np.sum(weights) - 1.0) > 0.01:
         return 1e10
 
-    rec_indemnity_per_acre = M_ind @ weights 
-    rec_premium_per_acre = M_prem @ weights
-    
-    rec_indemnity_total = rec_indemnity_per_acre * acres_arr.flatten()
-    rec_premium_total = rec_premium_per_acre * acres_arr.flatten()
-    
+    # M_ind and M_prem now contain total values (already includes acres from prepare_vectorized_data)
+    rec_indemnity_total = M_ind @ weights
+    rec_premium_total = M_prem @ weights
+
     df_temp = pd.DataFrame({'year': years_arr, 'ind': rec_indemnity_total, 'prem': rec_premium_total})
     year_sums = df_temp.groupby('year').sum()
     
@@ -1268,15 +1279,16 @@ def calculate_staggered_portfolio_returns(M_ind, M_prem, years_arr, acres_arr, g
     
     for rec_idx in range(num_records):
         grid_idx = min(rec_idx // records_per_grid, num_grids - 1) if records_per_grid > 0 else 0
-        
+
         pattern = grid_assignments[grid_idx]
         weights = pattern_A_weights if pattern == 0 else pattern_B_weights
-        
+
+        # M_ind and M_prem now contain total values (already includes acres)
         rec_ind = M_ind[rec_idx] @ weights
         rec_prem = M_prem[rec_idx] @ weights
-        
-        rec_indemnities.append(rec_ind * acres_arr[rec_idx, 0])
-        rec_premiums.append(rec_prem * acres_arr[rec_idx, 0])
+
+        rec_indemnities.append(rec_ind)
+        rec_premiums.append(rec_prem)
     
     # Aggregate by year
     df_temp = pd.DataFrame({
@@ -1547,17 +1559,15 @@ def run_fast_optimization_core(M_ind, M_prem, years_arr, acres_arr, num_grids, n
             if improved: break
             
     final_weights = current_weights
-    
+
     final_weights = np.round(final_weights / ALLOCATION_INCREMENT) * ALLOCATION_INCREMENT
-    
+
     final_weights = final_weights / np.sum(final_weights)
-    
-    rec_indemnity_per_acre = M_ind @ final_weights 
-    rec_premium_per_acre = M_prem @ final_weights
-    
-    rec_indemnity_total = rec_indemnity_per_acre * acres_arr.flatten()
-    rec_premium_total = rec_premium_per_acre * acres_arr.flatten()
-    
+
+    # M_ind and M_prem now contain total values (already includes acres)
+    rec_indemnity_total = M_ind @ final_weights
+    rec_premium_total = M_prem @ final_weights
+
     df_res = pd.DataFrame({'year': years_arr, 'ind': rec_indemnity_total, 'prem': rec_premium_total})
     year_sums = df_res.groupby('year').sum()
     
@@ -3072,17 +3082,20 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
         st.session_state.portfolio_base_data = None
         
         with st.spinner("Fetching all grid histories and running backtest..."):
+            # Convert grid_acres dict to hashable tuple for caching
+            grid_acres_tuple = tuple(sorted(grid_acres.items()))
+
             all_year_df = fetch_and_process_all_grid_histories(
-                session, selected_grids, best_strategies, common_params
+                session, selected_grids, best_strategies, common_params, grid_acres_tuple
             )
-            
+
             if all_year_df.empty:
                 st.error("Could not retrieve any historical data for the selected grids.")
                 return
-            
+
             portfolio_avg_z_by_year = all_year_df.groupby('year')['avg_hist_z'].mean()
             portfolio_avg_phase_by_year = all_year_df.groupby('year')['dominant_phase'].apply(lambda x: x.mode()[0] if not x.empty else 'Neutral')
-            
+
             analog_years_list = []
             if selected_scenario == 'All Years (except Current Year)':
                 # Exclude current year (2025) and any future years - only use historical data
@@ -3111,16 +3124,13 @@ def render_portfolio_tab(session, all_grid_ids, common_params):
                 return
 
             filtered_df = all_year_df[all_year_df['year'].isin(analog_years_list)].copy()
-            
+
             st.session_state.portfolio_base_data = filtered_df
-            
-            filtered_df['acres'] = filtered_df['grid'].map(grid_acres)
-            filtered_df['weighted_indemnity'] = filtered_df['indemnity'] * filtered_df['acres']
-            filtered_df['weighted_premium'] = filtered_df['premium'] * filtered_df['acres']
-            
+
+            # Indemnity and premium are already calculated with actual acres, just sum them
             yearly_portfolio_performance_naive_df = filtered_df.groupby('year').agg(
-                indemnity=('weighted_indemnity', 'sum'),
-                premium=('weighted_premium', 'sum')
+                indemnity=('indemnity', 'sum'),
+                premium=('premium', 'sum')
             )
             
             yearly_portfolio_performance_naive_df['roi'] = (yearly_portfolio_performance_naive_df['indemnity'] - yearly_portfolio_performance_naive_df['premium']) / yearly_portfolio_performance_naive_df['premium']
